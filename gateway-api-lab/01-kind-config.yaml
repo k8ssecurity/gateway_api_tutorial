@@ -1,0 +1,59 @@
+# =============================================================================
+# KIND Cluster Configuration
+# =============================================================================
+#
+# NETWORK ANALOGY: This creates a mini data center on your laptop.
+# - KIND (Kubernetes IN Docker) runs K8s nodes as Docker containers
+# - 1 control-plane node = Management server (API server, scheduler)
+# - 2 worker nodes = Compute servers that run your applications
+#
+# WHY THESE SETTINGS?
+# - disableDefaultCNI: We'll install Cilium instead (more features)
+# - kubeProxyMode: none: Cilium replaces kube-proxy for better performance
+# - extraPortMappings: Exposes ports from the cluster to your laptop
+#
+# =============================================================================
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: gateway-api-lab
+nodes:
+  # Control Plane Node - The "brain" of Kubernetes
+  # Runs: API Server, Scheduler, Controller Manager, etcd
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    # Port mappings: Allow traffic from your laptop to reach the cluster
+    # Like NAT rules on a firewall
+    extraPortMappings:
+      - containerPort: 80        # HTTP
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443       # HTTPS
+        hostPort: 443
+        protocol: TCP
+      - containerPort: 30000     # NodePort range start
+        hostPort: 30000
+        protocol: TCP
+      - containerPort: 30001     # Additional NodePort
+        hostPort: 30001
+        protocol: TCP
+
+  # Worker Nodes - Where your applications actually run
+  - role: worker
+  - role: worker
+
+networking:
+  # Disable the default CNI - we'll install Cilium manually
+  disableDefaultCNI: true
+  # Disable kube-proxy - Cilium will handle all networking
+  # This enables eBPF-based networking (faster than iptables)
+  kubeProxyMode: none
+  # Pod network CIDR - IP range for pods (like a /16 subnet)
+  podSubnet: "10.244.0.0/16"
+  # Service network CIDR - IP range for Services
+  serviceSubnet: "10.96.0.0/12"

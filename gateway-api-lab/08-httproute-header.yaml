@@ -1,0 +1,77 @@
+# =============================================================================
+# Header-Based Routing - Route by HTTP Headers
+# =============================================================================
+#
+# NETWORK ANALOGY: Like content-based routing on an ADC (Application Delivery Controller).
+# - Inspect HTTP headers and route accordingly
+# - Similar to: F5 iRules, HAProxy ACLs, or Nginx map directives
+#
+# USE CASES:
+# - Internal testing: Add header to test canary without affecting users
+# - Feature flags: Route users with specific headers to new features
+# - Multi-tenant: Route by X-Tenant-ID header
+# - Debug mode: Route X-Debug: true to verbose logging backend
+#
+# HOW TO TEST:
+#   # Normal request → goes to stable
+#   curl http://webapp.local.dev/
+#
+#   # Request with canary header → goes to canary
+#   curl -H "X-Canary: true" http://webapp.local.dev/
+#
+# =============================================================================
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: webapp-route-header
+  namespace: demo-app
+spec:
+  parentRefs:
+    - name: eg-gateway
+      namespace: envoy-gateway-system
+
+  hostnames:
+    - "webapp.local.dev"
+
+  rules:
+    # Rule 1: If X-Canary header is "true", route to canary
+    # This rule is evaluated FIRST because it's more specific
+    - matches:
+        - headers:
+            - name: X-Canary      # Header name to match
+              value: "true"       # Required value
+      backendRefs:
+        - name: webapp-canary-service
+          port: 80
+
+    # Rule 2: Default - all other traffic goes to stable
+    # This catches everything that didn't match Rule 1
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: webapp-service
+          port: 80
+
+# =============================================================================
+# OTHER HEADER MATCHING OPTIONS:
+#
+# Exact match:
+#   - name: X-Version
+#     value: "v2"
+#
+# Regex match (if supported by implementation):
+#   - name: X-Version
+#     value: "v[0-9]+"
+#     type: RegularExpression
+#
+# Multiple headers (AND logic):
+#   matches:
+#     - headers:
+#         - name: X-Canary
+#           value: "true"
+#         - name: X-Region
+#           value: "us-west"
+# =============================================================================

@@ -1,0 +1,60 @@
+# =============================================================================
+# Traffic Splitting - Canary Deployment Route
+# =============================================================================
+#
+# NETWORK ANALOGY: Like weighted load balancing or GSLB ratios.
+# - 90% of traffic → stable version (webapp-service)
+# - 10% of traffic → canary version (webapp-canary-service)
+#
+# USE CASES:
+# - A/B testing: Test new features with a subset of users
+# - Canary releases: Gradually roll out new versions
+# - Blue/Green: Switch traffic between versions
+#
+# HOW IT WORKS:
+# The Gateway controller uses the weights to distribute requests.
+# Out of every 100 requests, ~90 go to stable, ~10 go to canary.
+#
+# TO TEST: Run curl multiple times and watch the responses alternate:
+#   for i in {1..20}; do curl -s http://webapp.local.dev/; done
+#
+# =============================================================================
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: webapp-route-canary
+  namespace: demo-app
+spec:
+  parentRefs:
+    - name: eg-gateway
+      namespace: envoy-gateway-system
+
+  hostnames:
+    - "webapp.local.dev"
+
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # Stable version gets 90% of traffic
+        - name: webapp-service
+          port: 80
+          weight: 90             # 90% weight
+
+        # Canary version gets 10% of traffic
+        - name: webapp-canary-service
+          port: 80
+          weight: 10             # 10% weight
+
+# =============================================================================
+# ADJUSTING WEIGHTS:
+#
+# Start cautious:     weight: 95 / weight: 5   (5% canary)
+# Increase if good:   weight: 80 / weight: 20  (20% canary)
+# Full rollout:       weight: 0  / weight: 100 (100% canary)
+#
+# To apply changes:   kubectl apply -f 07-httproute-canary.yaml
+# =============================================================================

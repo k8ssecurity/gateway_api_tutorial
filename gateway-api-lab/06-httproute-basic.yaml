@@ -1,0 +1,45 @@
+# =============================================================================
+# HTTPRoute - Traffic Routing Rules
+# =============================================================================
+#
+# NETWORK ANALOGY: This is like a load balancer traffic policy or L7 rule.
+# - parentRefs = Which Gateway (VIP) this rule applies to
+# - hostnames = Host header matching (like virtual hosting)
+# - rules = Routing decisions (path, headers, methods)
+# - backendRefs = Destination server pool
+#
+# HTTPRoutes "attach" to Gateways - multiple routes can use the same Gateway.
+# This separation allows app teams to manage their own routing rules
+# while infra teams manage the Gateway infrastructure.
+#
+# =============================================================================
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: webapp-route
+  namespace: demo-app               # Lives in the application namespace
+spec:
+  parentRefs:
+    # Which Gateway should handle this route?
+    # Similar to: associating a policy with a specific virtual server
+    - name: eg-gateway
+      namespace: envoy-gateway-system
+
+  hostnames:
+    # Match requests with this Host header
+    # Like virtual hosting - same IP can serve multiple domains
+    - "webapp.local.dev"
+
+  rules:
+    # Routing rule: Match all paths and send to webapp-service
+    - matches:
+        - path:
+            type: PathPrefix        # Match anything starting with /
+            value: /
+      backendRefs:
+        # Where to send the traffic
+        # Like: pool members in a server pool
+        - name: webapp-service      # The Kubernetes Service name
+          port: 80                  # The Service port
+          weight: 100               # 100% of traffic goes here

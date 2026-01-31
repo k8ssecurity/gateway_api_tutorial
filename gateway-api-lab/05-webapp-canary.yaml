@@ -1,0 +1,83 @@
+# =============================================================================
+# Canary Version - New Version for Testing
+# =============================================================================
+#
+# NETWORK ANALOGY: This is a second server pool with the new software version.
+# In a traditional setup, you might:
+# 1. Deploy new version to a few servers
+# 2. Send 10% of traffic to test
+# 3. Monitor for errors
+# 4. Gradually increase traffic if healthy
+#
+# Gateway API makes this easy with weight-based routing!
+#
+# WHY CANARY DEPLOYMENTS?
+# - Test new versions with real traffic
+# - Limit blast radius if something goes wrong
+# - Quick rollback by adjusting weights
+#
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp-canary
+  namespace: demo-app
+  labels:
+    app: webapp
+    version: canary              # Different version label
+spec:
+  replicas: 1                    # Just 1 pod for testing
+  selector:
+    matchLabels:
+      app: webapp
+      version: canary            # Selects only canary pods
+  template:
+    metadata:
+      labels:
+        app: webapp
+        version: canary
+    spec:
+      containers:
+        - name: webapp
+          image: hashicorp/http-echo:1.0
+          args:
+            # Different message so you can see which version responds
+            - "-text=🐤 CANARY VERSION! Pod: $(POD_NAME)"
+            - "-listen=:8080"
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+---
+# Separate Service for canary version
+# This allows routing traffic specifically to canary pods
+apiVersion: v1
+kind: Service
+metadata:
+  name: webapp-canary-service    # Different service name
+  namespace: demo-app
+  labels:
+    app: webapp
+    version: canary
+spec:
+  type: ClusterIP
+  selector:
+    app: webapp
+    version: canary              # Only selects canary pods
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP

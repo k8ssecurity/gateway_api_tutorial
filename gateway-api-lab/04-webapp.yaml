@@ -1,0 +1,93 @@
+# =============================================================================
+# Sample Web Application - Backend Servers
+# =============================================================================
+#
+# NETWORK ANALOGY: This is like your web server farm behind the load balancer.
+# - Deployment = A group of identical servers (like a server pool)
+# - Service = The internal "VIP" that load balances across the pods
+# - Pods = Individual server instances (3 replicas = 3 servers)
+#
+# The Service acts as an internal load balancer within Kubernetes,
+# distributing traffic to healthy pods (servers).
+#
+# =============================================================================
+
+# First, create a namespace (like a network segment or VLAN for isolation)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-app
+---
+# Deployment: Defines HOW to run your application
+# Think of this as your server provisioning template
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp
+  namespace: demo-app
+  labels:
+    app: webapp
+spec:
+  replicas: 3                       # Run 3 identical pods (like 3 servers in a pool)
+  selector:
+    matchLabels:
+      app: webapp
+  template:
+    metadata:
+      labels:
+        app: webapp
+        version: v1                 # Version label - useful for canary deployments
+    spec:
+      containers:
+        - name: webapp
+          image: hashicorp/http-echo:1.0   # A simple web server that echoes text
+          args:
+            - "-text=Hello from Gateway API! Pod: $(POD_NAME)"
+            - "-listen=:8080"       # Listen on port 8080 inside the container
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: POD_NAME        # Inject pod name so we can see load balancing
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:               # Minimum resources guaranteed
+              memory: "32Mi"
+              cpu: "50m"
+            limits:                 # Maximum resources allowed
+              memory: "64Mi"
+              cpu: "100m"
+          # Health checks - similar to LB health monitors
+          livenessProbe:            # Is the server alive? (restart if not)
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:           # Is the server ready for traffic?
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+---
+# Service: Internal load balancer that groups pods together
+# Think of this as your server pool's internal VIP
+apiVersion: v1
+kind: Service
+metadata:
+  name: webapp-service
+  namespace: demo-app
+  labels:
+    app: webapp
+spec:
+  type: ClusterIP                   # Internal-only IP (not exposed externally)
+  selector:
+    app: webapp                     # Route to pods with label "app: webapp"
+  ports:
+    - name: http
+      port: 80                      # Service listens on port 80
+      targetPort: 8080              # Forward to container port 8080
+      protocol: TCP

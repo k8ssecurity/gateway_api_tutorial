@@ -1,0 +1,57 @@
+# =============================================================================
+# MetalLB Configuration - LoadBalancer IP Pool
+# =============================================================================
+#
+# NETWORK ANALOGY: This is like a DHCP pool for your load balancer VIPs.
+# - In cloud: AWS/GCP/Azure automatically provide external IPs
+# - On-prem/local: MetalLB fills this gap by managing a pool of IPs
+#
+# HOW IT WORKS:
+# 1. When you create a Service type: LoadBalancer, K8s requests an IP
+# 2. MetalLB assigns an IP from this pool
+# 3. MetalLB advertises the IP using L2 (ARP) or BGP
+#
+# NOTE: The setup.sh script auto-generates this based on your Docker network.
+# If running manually, check your network: docker network inspect kind
+#
+# =============================================================================
+
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: kind-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    # IP range to assign to LoadBalancer services
+    # Must be on the same L2 network as KIND nodes
+    # The setup.sh script calculates this automatically
+    - 172.18.255.200-172.18.255.250
+
+---
+# L2Advertisement: Tell MetalLB to use Layer 2 mode (ARP)
+# This is simpler than BGP and works in most local environments
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: kind-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - kind-pool                   # Use IPs from the pool above
+
+# =============================================================================
+# TROUBLESHOOTING:
+#
+# 1. Find your Docker network range:
+#    docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+#
+# 2. If Gateway stays "Pending" for IP:
+#    - Check MetalLB pods: kubectl get pods -n metallb-system
+#    - Check IP pool: kubectl get ipaddresspools -n metallb-system
+#    - Verify IPs are in KIND's network range
+#
+# 3. Common IP ranges by Docker version:
+#    - Linux: 172.18.x.x or 172.19.x.x
+#    - macOS: 172.18.x.x (usually)
+# =============================================================================
