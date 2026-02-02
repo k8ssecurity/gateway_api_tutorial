@@ -1,0 +1,123 @@
+# =============================================================================
+# TLSRoute - TLS Passthrough Routing (SNI-based)
+# =============================================================================
+#
+# NETWORK ANALOGY: Like SSL/TLS passthrough on a load balancer.
+# - Traffic stays encrypted end-to-end
+# - Gateway routes based on SNI (Server Name Indication) header
+# - Backend handles TLS termination (not the Gateway)
+#
+# COMPARISON:
+# - HTTPRoute + Gateway TLS: Gateway terminates TLS, inspects HTTP, re-encrypts
+# - TLSRoute: Gateway does NOT decrypt, just routes based on SNI
+#
+# USE CASES:
+# - Backend requires end-to-end encryption (compliance, security)
+# - Backend has its own certificate (can't share with Gateway)
+# - mTLS between client and backend
+# - Performance: avoid double encryption/decryption
+#
+# REQUIREMENTS:
+# - Experimental Gateway API CRDs must be installed
+# - Gateway listener must use mode: Passthrough
+# - Backend must handle TLS termination
+#
+# =============================================================================
+
+# First, we need a Gateway listener configured for TLS Passthrough
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: eg-gateway-passthrough
+  namespace: envoy-gateway-system
+spec:
+  gatewayClassName: eg
+  listeners:
+    # TLS Passthrough listener - does NOT terminate TLS
+    - name: tls-passthrough
+      protocol: TLS
+      port: 8443                    # Different port to avoid conflict with main Gateway
+      tls:
+        mode: Passthrough           # KEY: Don't decrypt, just forward based on SNI
+      allowedRoutes:
+        namespaces:
+          from: All
+
+---
+# TLSRoute - Routes encrypted traffic based on SNI hostname
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TLSRoute
+metadata:
+  name: webapp-tls-passthrough
+  namespace: demo-app
+spec:
+  parentRefs:
+    # Attach to the passthrough Gateway listener
+    - name: eg-gateway-passthrough
+      namespace: envoy-gateway-system
+      sectionName: tls-passthrough  # Must match listener name
+
+  hostnames:
+    # SNI hostname to match (client sends this in TLS handshake)
+    - "secure.local.dev"
+
+  rules:
+    - backendRefs:
+        # Backend must be running a TLS server
+        # Traffic arrives still encrypted - backend decrypts it
+        - name: webapp-tls-service
+          port: 443
+
+# =============================================================================
+# EXAMPLE: Backend Service with TLS
+#
+# For testing, you would need a backend that serves TLS, for example:
+#
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: webapp-tls-service
+#   namespace: demo-app
+# spec:
+#   selector:
+#     app: webapp-tls
+#   ports:
+#     - port: 443
+#       targetPort: 8443
+#
+# The pod would need to run an HTTPS server with its own certificate.
+# =============================================================================
+
+# =============================================================================
+# HOW TO TEST:
+#
+# 1. Deploy a backend that serves HTTPS (e.g., nginx with TLS config)
+# 2. Apply this TLSRoute
+# 3. Get the Gateway IP:
+#    GATEWAY_IP=$(kubectl get gateway/eg-gateway-passthrough -n envoy-gateway-system \
+#                 -o jsonpath='{.status.addresses[0].value}')
+# 4. Test with curl (traffic goes through Gateway but stays encrypted):
+#    curl -k --resolve secure.local.dev:8443:$GATEWAY_IP https://secure.local.dev:8443/
+#
+# The Gateway only sees the encrypted TLS stream and the SNI header.
+# It cannot inspect HTTP headers, paths, or body content.
+# =============================================================================
+
+# =============================================================================
+# TLSRoute vs HTTPRoute with TLS:
+#
+# HTTPRoute + Gateway TLS termination:
+#   Client ---[TLS]--> Gateway ---[decrypt/inspect/re-encrypt]--> Backend
+#   - Gateway sees HTTP content (can route by path, headers)
+#   - Gateway manages certificates
+#   - Two TLS connections (client→gateway, gateway→backend)
+#
+# TLSRoute (Passthrough):
+#   Client ---[TLS]--------------------------------> Backend
+#                     ↑
+#              Gateway (routes by SNI only)
+#   - Gateway CANNOT see HTTP content
+#   - Backend manages its own certificate
+#   - Single TLS connection (end-to-end)
+# =============================================================================

@@ -53,6 +53,15 @@ Before running, install these tools:
 | helm | K8s package manager | `brew install helm` |
 | cilium | Cilium CLI | `brew install cilium-cli` |
 
+## Component Versions (February 2026)
+
+| Component | Version | Notes |
+|-----------|---------|-------|
+| Gateway API | v1.4.1 | Experimental channel (includes TLSRoute) |
+| Envoy Gateway | v1.6.3 | Latest stable |
+| Cilium | v1.18.6 | eBPF-based CNI |
+| MetalLB | v0.15.3 | LoadBalancer for bare metal |
+
 **Linux users:** See the main tutorial for installation commands.
 
 ## Lab Files
@@ -67,6 +76,7 @@ Before running, install these tools:
 | `06-httproute-basic.yaml` | Basic routing: all traffic → stable |
 | `07-httproute-canary.yaml` | Traffic splitting: 90% stable, 10% canary |
 | `08-httproute-header.yaml` | Header-based routing: X-Canary: true → canary |
+| `09-tlsroute-passthrough.yaml` | TLS passthrough routing (SNI-based) |
 | `setup.sh` | Automated setup script |
 | `cleanup.sh` | Cleanup script |
 
@@ -79,20 +89,20 @@ If you prefer to understand each step:
 kind create cluster --config=01-kind-config.yaml
 
 # 2. Install Cilium (pod networking)
-cilium install --version 1.16.5 --set kubeProxyReplacement=true
+cilium install --version 1.18.6 --set kubeProxyReplacement=true
 cilium status --wait
 
 # 3. Install MetalLB (provides external IPs)
-kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.9/config/manifests/metallb-native.yaml
+kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.15.3/config/manifests/metallb-native.yaml
 kubectl wait -n metallb-system --for=condition=ready pod --selector=app=metallb --timeout=120s
 kubectl apply -f 02-metallb-config.yaml
 
-# 4. Install Gateway API CRDs (adds GatewayClass, Gateway, HTTPRoute types)
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml
+# 4. Install Gateway API CRDs - EXPERIMENTAL channel (includes TLSRoute)
+kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/experimental-install.yaml
 
 # 5. Install Envoy Gateway (the controller)
 helm install eg oci://docker.io/envoyproxy/gateway-helm \
-    --version v1.2.6 \
+    --version v1.6.3 \
     -n envoy-gateway-system \
     --create-namespace \
     --skip-crds
@@ -156,6 +166,25 @@ curl http://webapp.local.dev/
 # With header → goes to canary
 curl -H "X-Canary: true" http://webapp.local.dev/
 ```
+
+### TLS Passthrough (TLSRoute)
+
+TLSRoute enables routing encrypted traffic without terminating TLS at the Gateway. The Gateway routes based on SNI (Server Name Indication) only.
+
+```bash
+# Apply TLSRoute (requires backend with TLS server)
+kubectl apply -f 09-tlsroute-passthrough.yaml
+
+# Key difference from HTTPRoute:
+# - HTTPRoute + TLS: Gateway decrypts → inspects HTTP → re-encrypts
+# - TLSRoute: Gateway forwards encrypted traffic based on SNI only
+```
+
+**When to use TLSRoute:**
+- End-to-end encryption requirements (compliance)
+- Backend manages its own certificates
+- mTLS between client and backend
+- Performance (avoid double TLS termination)
 
 ## Troubleshooting
 

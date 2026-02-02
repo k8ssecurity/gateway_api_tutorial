@@ -35,11 +35,12 @@ NC='\033[0m' # No Color
 
 # Version Configuration
 # These are pinned to known-working versions for reproducibility
+# Last updated: February 2026
 CLUSTER_NAME="gateway-api-lab"
-CILIUM_VERSION="1.16.5"
-METALLB_VERSION="v0.14.9"
-GATEWAY_API_VERSION="v1.2.1"
-ENVOY_GATEWAY_VERSION="v1.2.6"
+CILIUM_VERSION="1.18.6"
+METALLB_VERSION="v0.15.3"
+GATEWAY_API_VERSION="v1.4.1"
+ENVOY_GATEWAY_VERSION="v1.6.3"
 
 # Helper functions for formatted output
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -163,17 +164,22 @@ EOF
 }
 
 # =============================================================================
-# Step 5: Install Gateway API CRDs
+# Step 5: Install Gateway API CRDs (Experimental Channel)
 # CRDs = Custom Resource Definitions (new types of K8s objects)
-# This adds GatewayClass, Gateway, HTTPRoute, etc. to your cluster
+# This adds GatewayClass, Gateway, HTTPRoute, TLSRoute, TCPRoute, etc.
+#
+# We use EXPERIMENTAL channel to get TLSRoute (for TLS passthrough)
+# Standard channel only has: GatewayClass, Gateway, HTTPRoute, GRPCRoute
+# Experimental adds: TLSRoute, TCPRoute, UDPRoute, ReferenceGrant
 # =============================================================================
 install_gateway_api_crds() {
-    info "Installing Gateway API CRDs $GATEWAY_API_VERSION..."
-    info "This adds the standard Gateway API resource types to Kubernetes"
+    info "Installing Gateway API CRDs $GATEWAY_API_VERSION (Experimental Channel)..."
+    info "This includes TLSRoute for TLS passthrough routing"
 
-    kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml
+    # Use --server-side for large CRD manifests (avoids annotation size limits)
+    kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/experimental-install.yaml
 
-    success "Gateway API CRDs installed!"
+    success "Gateway API CRDs installed (including TLSRoute)!"
 }
 
 # =============================================================================

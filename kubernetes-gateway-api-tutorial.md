@@ -260,7 +260,7 @@ Cilium provides the network connectivity between pods. Without a CNI, pods can't
 # Install Cilium with kube-proxy replacement
 # This takes 2-3 minutes as it downloads and starts the Cilium agents
 cilium install \
-  --version 1.16.5 \
+  --version 1.18.6 \
   --set kubeProxyReplacement=true \
   --set k8sServiceHost=gateway-api-lab-control-plane \
   --set k8sServicePort=6443
@@ -300,7 +300,7 @@ In cloud environments (AWS, GCP, Azure), when you create a LoadBalancer service,
 
 ```bash
 # Install MetalLB components
-kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.9/config/manifests/metallb-native.yaml
+kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.15.3/config/manifests/metallb-native.yaml
 
 # Wait for MetalLB pods to be ready (about 30 seconds)
 kubectl wait --namespace metallb-system \
@@ -363,13 +363,18 @@ kubectl get ipaddresspools -n metallb-system
 
 Envoy Gateway is the software that actually handles incoming traffic and routes it to your applications. It implements the Gateway API specification using Envoy proxy under the hood.
 
-### Step 4.1: Install Gateway API CRDs
+### Step 4.1: Install Gateway API CRDs (Experimental Channel)
 
-First, we install the Gateway API Custom Resource Definitions (CRDs). These define the new resource types (Gateway, HTTPRoute, etc.) that Kubernetes will understand.
+First, we install the Gateway API Custom Resource Definitions (CRDs). These define the new resource types (Gateway, HTTPRoute, TLSRoute, etc.) that Kubernetes will understand.
+
+We use the **Experimental** channel to get TLSRoute support (for TLS passthrough routing):
+- **Standard channel**: GatewayClass, Gateway, HTTPRoute, GRPCRoute
+- **Experimental channel**: All standard + TLSRoute, TCPRoute, UDPRoute
 
 ```bash
-# Install the standard Gateway API CRDs
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml
+# Install the EXPERIMENTAL Gateway API CRDs (includes TLSRoute)
+# Use --server-side to handle large CRD manifests
+kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/experimental-install.yaml
 
 # Verify CRDs are installed
 kubectl get crds | grep gateway
@@ -377,11 +382,14 @@ kubectl get crds | grep gateway
 
 Expected output:
 ```
-gatewayclasses.gateway.networking.k8s.io       2024-xx-xx
-gateways.gateway.networking.k8s.io             2024-xx-xx
-grpcroutes.gateway.networking.k8s.io           2024-xx-xx
-httproutes.gateway.networking.k8s.io           2024-xx-xx
-referencegrants.gateway.networking.k8s.io      2024-xx-xx
+gatewayclasses.gateway.networking.k8s.io       2026-xx-xx
+gateways.gateway.networking.k8s.io             2026-xx-xx
+grpcroutes.gateway.networking.k8s.io           2026-xx-xx
+httproutes.gateway.networking.k8s.io           2026-xx-xx
+referencegrants.gateway.networking.k8s.io      2026-xx-xx
+tcproutes.gateway.networking.k8s.io            2026-xx-xx   # Experimental
+tlsroutes.gateway.networking.k8s.io            2026-xx-xx   # Experimental
+udproutes.gateway.networking.k8s.io            2026-xx-xx   # Experimental
 ```
 
 ### Step 4.2: Install Envoy Gateway using Helm
@@ -392,7 +400,7 @@ Now we install the Envoy Gateway controller. This watches for Gateway resources 
 # Install Envoy Gateway
 # --skip-crds because we already installed Gateway API CRDs above
 helm install eg oci://docker.io/envoyproxy/gateway-helm \
-  --version v1.2.6 \
+  --version v1.6.3 \
   -n envoy-gateway-system \
   --create-namespace \
   --skip-crds
@@ -843,7 +851,76 @@ curl http://$GATEWAY_IP/          # Goes to stable
 curl http://$GATEWAY_IP/canary    # Goes to canary
 ```
 
-### 7.4: Reset to Basic Routing
+### 7.4: TLS Passthrough with TLSRoute
+
+TLSRoute is an **experimental** feature that routes encrypted TLS traffic without terminating it at the Gateway. The Gateway forwards traffic based on SNI (Server Name Indication) only - it never decrypts the traffic.
+
+**Network Analogy**: Like SSL/TLS passthrough on a traditional load balancer.
+
+**When to use TLSRoute instead of HTTPRoute + Gateway TLS:**
+- End-to-end encryption requirements (compliance, security)
+- Backend manages its own certificates
+- mTLS between client and backend
+- Performance (avoid double TLS termination)
+
+```bash
+# First, create a Gateway listener with TLS Passthrough mode
+kubectl apply -f - <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: eg-gateway-passthrough
+  namespace: envoy-gateway-system
+spec:
+  gatewayClassName: eg
+  listeners:
+    - name: tls-passthrough
+      protocol: TLS
+      port: 8443
+      tls:
+        mode: Passthrough    # KEY: Don't decrypt, forward based on SNI
+      allowedRoutes:
+        namespaces:
+          from: All
+EOF
+
+# Create a TLSRoute (uses v1alpha2 API)
+kubectl apply -f - <<EOF
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TLSRoute
+metadata:
+  name: secure-app-route
+  namespace: demo-app
+spec:
+  parentRefs:
+    - name: eg-gateway-passthrough
+      namespace: envoy-gateway-system
+      sectionName: tls-passthrough
+  hostnames:
+    - "secure.local.dev"      # SNI hostname to match
+  rules:
+    - backendRefs:
+        - name: webapp-tls-service   # Backend must serve TLS
+          port: 443
+EOF
+```
+
+**Key Differences:**
+```
+HTTPRoute + Gateway TLS termination:
+  Client ---[TLS]--> Gateway ---[decrypt/inspect]--> Backend
+  - Gateway sees HTTP content (can route by path, headers)
+  - Gateway manages certificates
+
+TLSRoute (Passthrough):
+  Client ---[TLS]----------------------------> Backend
+                    ↑
+             Gateway (routes by SNI only)
+  - Gateway CANNOT see HTTP content
+  - Backend manages its own certificate
+```
+
+### 7.5: Reset to Basic Routing
 
 To go back to simple routing:
 
@@ -896,7 +973,7 @@ kubectl logs -n kube-system -l k8s-app=cilium --tail=50
 
 # Reinstall Cilium if needed
 cilium uninstall
-cilium install --version 1.16.5 --set kubeProxyReplacement=true
+cilium install --version 1.18.6 --set kubeProxyReplacement=true
 ```
 
 ### Gateway Has No External IP
@@ -996,7 +1073,7 @@ kind delete cluster --name gateway-api-lab
 
 ---
 
-*Tutorial created January 2026 | Envoy Gateway v1.2.6 | Cilium v1.16.5 | Gateway API v1.2.1*
+*Tutorial updated February 2026 | Envoy Gateway v1.6.3 | Cilium v1.18.6 | Gateway API v1.4.1 (Experimental)*
 
 ---
 
