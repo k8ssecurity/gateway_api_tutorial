@@ -863,8 +863,103 @@ TLSRoute is an **experimental** feature that routes encrypted TLS traffic withou
 - mTLS between client and backend
 - Performance (avoid double TLS termination)
 
+#### Step 1: Deploy a TLS-enabled Backend
+
+First, we need a backend that serves HTTPS. We'll create an nginx pod with its own TLS certificate:
+
 ```bash
-# First, create a Gateway listener with TLS Passthrough mode
+# Create a self-signed certificate for the backend
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout /tmp/backend-tls.key -out /tmp/backend-tls.crt \
+    -subj "/CN=secure.local.dev" \
+    -addext "subjectAltName=DNS:secure.local.dev,DNS:localhost"
+
+# Create a secret in demo-app namespace for the backend certificate
+kubectl create secret tls backend-tls-cert \
+    --cert=/tmp/backend-tls.crt \
+    --key=/tmp/backend-tls.key \
+    -n demo-app
+
+# Clean up temp files
+rm -f /tmp/backend-tls.key /tmp/backend-tls.crt
+
+# Deploy nginx with TLS enabled
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-tls-config
+  namespace: demo-app
+data:
+  default.conf: |
+    server {
+        listen 443 ssl;
+        server_name secure.local.dev;
+
+        ssl_certificate /etc/nginx/ssl/tls.crt;
+        ssl_certificate_key /etc/nginx/ssl/tls.key;
+
+        location / {
+            return 200 'Hello from TLS Passthrough Backend!\nThe Gateway did NOT decrypt this traffic.\nYour connection is end-to-end encrypted.\n';
+            add_header Content-Type text/plain;
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp-tls
+  namespace: demo-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webapp-tls
+  template:
+    metadata:
+      labels:
+        app: webapp-tls
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 443
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /etc/nginx/ssl
+              readOnly: true
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
+      volumes:
+        - name: tls-certs
+          secret:
+            secretName: backend-tls-cert
+        - name: nginx-config
+          configMap:
+            name: nginx-tls-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webapp-tls-service
+  namespace: demo-app
+spec:
+  selector:
+    app: webapp-tls
+  ports:
+    - port: 443
+      targetPort: 443
+EOF
+
+# Wait for the TLS backend to be ready
+kubectl wait --timeout=60s -n demo-app deployment/webapp-tls --for=condition=Available
+```
+
+#### Step 2: Create the Passthrough Gateway
+
+```bash
+# Create a Gateway listener with TLS Passthrough mode
 kubectl apply -f - <<EOF
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
@@ -884,7 +979,14 @@ spec:
           from: All
 EOF
 
-# Create a TLSRoute (uses v1alpha2 API)
+# Wait for Gateway to be ready
+kubectl wait --timeout=2m -n envoy-gateway-system gateway/eg-gateway-passthrough --for=condition=Programmed
+```
+
+#### Step 3: Create the TLSRoute
+
+```bash
+# Create a TLSRoute (uses v1alpha2 API - experimental)
 kubectl apply -f - <<EOF
 apiVersion: gateway.networking.k8s.io/v1alpha2
 kind: TLSRoute
@@ -900,9 +1002,58 @@ spec:
     - "secure.local.dev"      # SNI hostname to match
   rules:
     - backendRefs:
-        - name: webapp-tls-service   # Backend must serve TLS
+        - name: webapp-tls-service
           port: 443
 EOF
+```
+
+#### Step 4: Test TLS Passthrough
+
+```bash
+# Get the passthrough Gateway IP
+PASSTHROUGH_IP=$(kubectl get gateway/eg-gateway-passthrough -n envoy-gateway-system -o jsonpath='{.status.addresses[0].value}')
+echo "Passthrough Gateway IP: $PASSTHROUGH_IP"
+
+# Add to /etc/hosts (or use --resolve)
+echo "$PASSTHROUGH_IP secure.local.dev" | sudo tee -a /etc/hosts
+
+# Test TLS passthrough - traffic goes through Gateway but stays encrypted end-to-end
+curl -k https://secure.local.dev:8443/
+
+# Alternative: Use --resolve instead of /etc/hosts
+curl -k --resolve secure.local.dev:8443:$PASSTHROUGH_IP https://secure.local.dev:8443/
+```
+
+Expected output:
+```
+Hello from TLS Passthrough Backend!
+The Gateway did NOT decrypt this traffic.
+Your connection is end-to-end encrypted.
+```
+
+#### Step 5: Verify It's Actually Passthrough
+
+To prove the Gateway isn't terminating TLS, check the certificate - it should be the **backend's certificate**, not the Gateway's:
+
+```bash
+# Show the certificate presented (should be CN=secure.local.dev from backend)
+echo | openssl s_client -connect $PASSTHROUGH_IP:8443 -servername secure.local.dev 2>/dev/null | openssl x509 -noout -subject -issuer
+
+# Expected output shows the backend certificate:
+# subject=CN = secure.local.dev
+# issuer=CN = secure.local.dev
+```
+
+If TLS was terminated at the Gateway, you'd see the Gateway's certificate instead.
+
+#### Step 6: Verify TLSRoute Status
+
+```bash
+# Check TLSRoute status
+kubectl describe tlsroute secure-app-route -n demo-app
+
+# Check Gateway status
+kubectl describe gateway eg-gateway-passthrough -n envoy-gateway-system
 ```
 
 **Key Differences:**
@@ -911,6 +1062,7 @@ HTTPRoute + Gateway TLS termination:
   Client ---[TLS]--> Gateway ---[decrypt/inspect]--> Backend
   - Gateway sees HTTP content (can route by path, headers)
   - Gateway manages certificates
+  - Certificate shown to client: Gateway's certificate
 
 TLSRoute (Passthrough):
   Client ---[TLS]----------------------------> Backend
@@ -918,6 +1070,19 @@ TLSRoute (Passthrough):
              Gateway (routes by SNI only)
   - Gateway CANNOT see HTTP content
   - Backend manages its own certificate
+  - Certificate shown to client: Backend's certificate
+```
+
+#### Cleanup TLSRoute Test Resources
+
+```bash
+# Remove TLSRoute test resources (optional)
+kubectl delete tlsroute secure-app-route -n demo-app
+kubectl delete gateway eg-gateway-passthrough -n envoy-gateway-system
+kubectl delete deployment webapp-tls -n demo-app
+kubectl delete service webapp-tls-service -n demo-app
+kubectl delete configmap nginx-tls-config -n demo-app
+kubectl delete secret backend-tls-cert -n demo-app
 ```
 
 ### 7.5: Reset to Basic Routing

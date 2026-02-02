@@ -1,5 +1,5 @@
 # =============================================================================
-# TLSRoute - TLS Passthrough Routing (SNI-based)
+# TLSRoute - TLS Passthrough Routing (SNI-based) - COMPLETE EXAMPLE
 # =============================================================================
 #
 # NETWORK ANALOGY: Like SSL/TLS passthrough on a load balancer.
@@ -24,8 +24,105 @@
 #
 # =============================================================================
 
-# First, we need a Gateway listener configured for TLS Passthrough
+# -----------------------------------------------------------------------------
+# STEP 1: Create backend TLS certificate (run this first!)
+# -----------------------------------------------------------------------------
+#
+# Before applying this file, create the backend certificate:
+#
+#   openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+#       -keyout /tmp/backend-tls.key -out /tmp/backend-tls.crt \
+#       -subj "/CN=secure.local.dev" \
+#       -addext "subjectAltName=DNS:secure.local.dev,DNS:localhost"
+#
+#   kubectl create secret tls backend-tls-cert \
+#       --cert=/tmp/backend-tls.crt \
+#       --key=/tmp/backend-tls.key \
+#       -n demo-app
+#
+#   rm -f /tmp/backend-tls.key /tmp/backend-tls.crt
+#
+# -----------------------------------------------------------------------------
+
 ---
+# Nginx configuration for HTTPS backend
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-tls-config
+  namespace: demo-app
+data:
+  default.conf: |
+    server {
+        listen 443 ssl;
+        server_name secure.local.dev;
+
+        ssl_certificate /etc/nginx/ssl/tls.crt;
+        ssl_certificate_key /etc/nginx/ssl/tls.key;
+
+        location / {
+            return 200 'Hello from TLS Passthrough Backend!\nThe Gateway did NOT decrypt this traffic.\nYour connection is end-to-end encrypted.\n';
+            add_header Content-Type text/plain;
+        }
+    }
+
+---
+# TLS-enabled backend deployment (nginx serving HTTPS)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp-tls
+  namespace: demo-app
+  labels:
+    app: webapp-tls
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webapp-tls
+  template:
+    metadata:
+      labels:
+        app: webapp-tls
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 443
+              name: https
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /etc/nginx/ssl
+              readOnly: true
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
+      volumes:
+        - name: tls-certs
+          secret:
+            secretName: backend-tls-cert    # Created manually above
+        - name: nginx-config
+          configMap:
+            name: nginx-tls-config
+
+---
+# Service for the TLS backend
+apiVersion: v1
+kind: Service
+metadata:
+  name: webapp-tls-service
+  namespace: demo-app
+spec:
+  selector:
+    app: webapp-tls
+  ports:
+    - port: 443
+      targetPort: 443
+      name: https
+
+---
+# Gateway with TLS Passthrough listener
+# This Gateway does NOT terminate TLS - it just forwards based on SNI
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
@@ -34,22 +131,22 @@ metadata:
 spec:
   gatewayClassName: eg
   listeners:
-    # TLS Passthrough listener - does NOT terminate TLS
     - name: tls-passthrough
       protocol: TLS
-      port: 8443                    # Different port to avoid conflict with main Gateway
+      port: 8443                    # Different port to avoid conflict
       tls:
-        mode: Passthrough           # KEY: Don't decrypt, just forward based on SNI
+        mode: Passthrough           # KEY: Don't decrypt, just forward
       allowedRoutes:
         namespaces:
           from: All
 
 ---
 # TLSRoute - Routes encrypted traffic based on SNI hostname
+# NOTE: This is v1alpha2 (experimental API)
 apiVersion: gateway.networking.k8s.io/v1alpha2
 kind: TLSRoute
 metadata:
-  name: webapp-tls-passthrough
+  name: secure-app-route
   namespace: demo-app
 spec:
   parentRefs:
@@ -59,7 +156,7 @@ spec:
       sectionName: tls-passthrough  # Must match listener name
 
   hostnames:
-    # SNI hostname to match (client sends this in TLS handshake)
+    # SNI hostname to match (client sends this in TLS ClientHello)
     - "secure.local.dev"
 
   rules:
@@ -70,54 +167,41 @@ spec:
           port: 443
 
 # =============================================================================
-# EXAMPLE: Backend Service with TLS
-#
-# For testing, you would need a backend that serves TLS, for example:
-#
-# apiVersion: v1
-# kind: Service
-# metadata:
-#   name: webapp-tls-service
-#   namespace: demo-app
-# spec:
-#   selector:
-#     app: webapp-tls
-#   ports:
-#     - port: 443
-#       targetPort: 8443
-#
-# The pod would need to run an HTTPS server with its own certificate.
-# =============================================================================
-
-# =============================================================================
 # HOW TO TEST:
-#
-# 1. Deploy a backend that serves HTTPS (e.g., nginx with TLS config)
-# 2. Apply this TLSRoute
-# 3. Get the Gateway IP:
-#    GATEWAY_IP=$(kubectl get gateway/eg-gateway-passthrough -n envoy-gateway-system \
-#                 -o jsonpath='{.status.addresses[0].value}')
-# 4. Test with curl (traffic goes through Gateway but stays encrypted):
-#    curl -k --resolve secure.local.dev:8443:$GATEWAY_IP https://secure.local.dev:8443/
-#
-# The Gateway only sees the encrypted TLS stream and the SNI header.
-# It cannot inspect HTTP headers, paths, or body content.
 # =============================================================================
-
+#
+# 1. First, create the backend TLS certificate (see STEP 1 above)
+#
+# 2. Apply this file:
+#    kubectl apply -f 09-tlsroute-passthrough.yaml
+#
+# 3. Wait for resources to be ready:
+#    kubectl wait --timeout=60s -n demo-app deployment/webapp-tls --for=condition=Available
+#    kubectl wait --timeout=2m -n envoy-gateway-system gateway/eg-gateway-passthrough --for=condition=Programmed
+#
+# 4. Get the Gateway IP:
+#    PASSTHROUGH_IP=$(kubectl get gateway/eg-gateway-passthrough -n envoy-gateway-system \
+#                     -o jsonpath='{.status.addresses[0].value}')
+#
+# 5. Test with curl:
+#    curl -k --resolve secure.local.dev:8443:$PASSTHROUGH_IP https://secure.local.dev:8443/
+#
+# Expected output:
+#    Hello from TLS Passthrough Backend!
+#    The Gateway did NOT decrypt this traffic.
+#    Your connection is end-to-end encrypted.
+#
+# 6. VERIFY it's passthrough (check the certificate is from backend, not Gateway):
+#    echo | openssl s_client -connect $PASSTHROUGH_IP:8443 -servername secure.local.dev 2>/dev/null \
+#         | openssl x509 -noout -subject
+#
+#    Expected: subject=CN = secure.local.dev  (backend's cert, not Gateway's)
+#
 # =============================================================================
-# TLSRoute vs HTTPRoute with TLS:
+# CLEANUP:
+# =============================================================================
 #
-# HTTPRoute + Gateway TLS termination:
-#   Client ---[TLS]--> Gateway ---[decrypt/inspect/re-encrypt]--> Backend
-#   - Gateway sees HTTP content (can route by path, headers)
-#   - Gateway manages certificates
-#   - Two TLS connections (client→gateway, gateway→backend)
+# kubectl delete -f 09-tlsroute-passthrough.yaml
+# kubectl delete secret backend-tls-cert -n demo-app
 #
-# TLSRoute (Passthrough):
-#   Client ---[TLS]--------------------------------> Backend
-#                     ↑
-#              Gateway (routes by SNI only)
-#   - Gateway CANNOT see HTTP content
-#   - Backend manages its own certificate
-#   - Single TLS connection (end-to-end)
 # =============================================================================
