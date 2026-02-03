@@ -1,9 +1,44 @@
-# agentgateway setup on kind (with MetalLB)
+# Agentgateway Setup on KIND (with MetalLB)
 
 This doc installs the agentgateway control plane, creates an agentgateway proxy (Gateway API `Gateway`), and wires up an MCP server through the gateway.
 
-It assumes you already have:
-- a working kind cluster
+---
+
+## What is Agentgateway?
+
+**Agentgateway is a SEPARATE gateway from Envoy Gateway.** It's specifically designed for AI agent communications.
+
+| Aspect | Envoy Gateway | Agentgateway |
+|--------|---------------|--------------|
+| **Purpose** | Traditional API traffic (HTTP, gRPC, TCP) | AI agent traffic (MCP, A2A protocols) |
+| **Data Plane** | Envoy Proxy (C++) | Agentgateway (Rust) |
+| **Use Cases** | Web apps, microservices, ingress | LLM tools, MCP servers, agent-to-agent |
+| **GatewayClass** | `eg` (Envoy Gateway) | `agentgateway` |
+| **Control Plane** | Envoy Gateway controller | kgateway controller |
+
+### Key Concepts
+
+| Term | Description |
+|------|-------------|
+| **MCP** | Model Context Protocol - standardizes how LLMs connect to external tools |
+| **A2A** | Agent-to-Agent protocol - enables AI agents to communicate |
+| **kgateway** | Dual control plane for both Envoy and Agentgateway |
+| **AgentgatewayBackend** | Custom resource defining MCP server targets |
+| **AgentgatewayPolicy** | Tool-level allow/deny rules (CEL expressions) |
+
+### When to Use Which?
+
+- **Envoy Gateway**: Web applications, REST APIs, microservices, traditional L7 routing
+- **Agentgateway**: LLM tool servers, MCP integrations, AI agent orchestration, tool access control
+
+You can run **both** in the same cluster - they use different GatewayClasses and don't conflict.
+
+---
+
+## Prerequisites
+
+This guide assumes you already have:
+- A working KIND cluster (from the Gateway API tutorial)
 - MetalLB installed and configured (so `LoadBalancer` Services get an IP)
 - `kubectl` and `helm` installed
 
@@ -14,12 +49,12 @@ It assumes you already have:
 If you already did this in the Gateway API tutorial in this repo, you can skip.
 
 ```bash
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml
 ```
 
 Optional (only if you need experimental Gateway API features later):
 ```bash
-kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/experimental-install.yaml
+kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/experimental-install.yaml
 ```
 
 ---
@@ -28,10 +63,20 @@ kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/re
 
 Pick a version and reuse it consistently.
 
+### Version Options (February 2026)
+
+| Version | Channel | Status |
+|---------|---------|--------|
+| `v2.1.x` | Stable | Production-ready, first version with agentgateway integration |
+| `v2.2.0-main` | Development | Latest features, may have breaking changes |
+| `v2.2.0-rc.x` | Release Candidate | Pre-release testing |
+
 ```bash
+# Development version (latest features)
 export AGW_VERSION=v2.2.0-main
-# example alternative if you prefer a tagged beta:
-# export AGW_VERSION=v2.2.0-beta.6
+
+# Or use the stable version for production:
+# export AGW_VERSION=v2.1.0
 ```
 
 Install the agentgateway CRDs:
@@ -234,7 +279,10 @@ EOF
 ```
 
 ### 5.3 Create an HTTPRoute at `/mcp-github`
+
 This sets CORS and injects the GitHub PAT as an Authorization header.
+
+> **Note:** The `CORS` filter type is a kgateway extension, not part of standard Gateway API. It works with kgateway/agentgateway but won't work with other Gateway API implementations like Envoy Gateway.
 
 ```bash
 kubectl apply -f- <<EOF
@@ -368,3 +416,53 @@ kubectl delete gateway agentgateway-proxy -n agentgateway-system
 helm uninstall agentgateway -n agentgateway-system
 helm uninstall agentgateway-crds -n agentgateway-system
 ```
+
+---
+
+## Troubleshooting
+
+### Gateway Not Getting IP
+
+```bash
+# Check if MetalLB is working
+kubectl get svc -n agentgateway-system agentgateway-proxy
+
+# If no EXTERNAL-IP, check MetalLB
+kubectl get pods -n metallb-system
+kubectl get ipaddresspools -n metallb-system
+```
+
+### MCP Connection Issues
+
+```bash
+# Check agentgateway pods
+kubectl get pods -n agentgateway-system
+kubectl logs -n agentgateway-system -l app.kubernetes.io/name=agentgateway
+
+# Check backend status
+kubectl get agentgatewaybackends -A
+kubectl describe agentgatewaybackend mcp-backend
+```
+
+### Policy Not Applied
+
+```bash
+# Check policy status
+kubectl get agentgatewaypolicies -A
+kubectl describe agentgatewaypolicy github-tools-allowlist -n agentgateway-system
+```
+
+---
+
+## References
+
+- [kgateway Documentation](https://kgateway.dev/)
+- [Agentgateway Docs](https://kgateway.dev/docs/integrations/agentgateway/)
+- [MCP Connectivity](https://kgateway.dev/docs/main/agentgateway/mcp/)
+- [kgateway GitHub](https://github.com/kgateway-dev/kgateway)
+- [Model Context Protocol](https://modelcontextprotocol.io/)
+- [kgateway v2.1 Release Notes](https://kgateway.dev/blog/kgateway-v2.1-release-blog/)
+
+---
+
+*Created on a Saturday morning with the help of Claude Cowork and the relentless effort of Philippe Bogaerts for guiding, testing, and troubleshooting. Because nothing says "weekend fun" like debugging x509 certificate errors.* 🎉
