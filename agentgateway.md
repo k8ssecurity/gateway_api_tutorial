@@ -14,7 +14,7 @@ This doc installs the agentgateway control plane, creates an agentgateway proxy 
 | **Data Plane** | Envoy Proxy (C++) | Agentgateway (Rust) |
 | **Use Cases** | Web apps, microservices, ingress | LLM tools, MCP servers, agent-to-agent |
 | **GatewayClass** | `eg` (Envoy Gateway) | `agentgateway` |
-| **Control Plane** | Envoy Gateway controller | kgateway controller |
+| **Control Plane** | Envoy Gateway controller | agentgateway controller |
 
 ### Key Concepts
 
@@ -22,7 +22,7 @@ This doc installs the agentgateway control plane, creates an agentgateway proxy 
 |------|-------------|
 | **MCP** | Model Context Protocol - standardizes how LLMs connect to external tools |
 | **A2A** | Agent-to-Agent protocol - enables AI agents to communicate |
-| **kgateway** | Dual control plane for both Envoy and Agentgateway |
+| **agentgateway** | Standalone control plane and data plane for AI/agent traffic (decoupled from kgateway since v1.0) |
 | **AgentgatewayBackend** | Custom resource defining MCP server targets |
 | **AgentgatewayPolicy** | Tool-level allow/deny rules (CEL expressions) |
 
@@ -61,34 +61,42 @@ The sections below walk through what `setup.sh` does and how to do it by hand.
 
 ## 1) Install agentgateway (control plane)
 
-The agentgateway control plane is delivered by the **kgateway** project. As of May 2026 the latest stable line is **v2.2.x**; we pin v2.2.4 below.
+As of agentgateway v1.0 the project was decoupled from kgateway and the Helm charts moved to `cr.agentgateway.dev/charts/`. The current stable line is **v1.1.x**.
 
 ```bash
-export AGW_VERSION=v2.2.4
+export AGW_VERSION=v1.1.0
 ```
 
-Install the CRDs:
+Install the CRDs (this also creates the `agentgateway-system` namespace):
 
 ```bash
-helm upgrade -i agentgateway-crds oci://ghcr.io/kgateway-dev/charts/agentgateway-crds \
+helm upgrade -i agentgateway-crds \
+  oci://cr.agentgateway.dev/charts/agentgateway-crds \
   --create-namespace --namespace agentgateway-system \
-  --version "${AGW_VERSION}" \
-  --set controller.image.pullPolicy=Always
+  --version "${AGW_VERSION}"
 ```
 
 Install the controller:
 
 ```bash
-helm upgrade -i agentgateway oci://ghcr.io/kgateway-dev/charts/agentgateway \
+helm upgrade -i agentgateway \
+  oci://cr.agentgateway.dev/charts/agentgateway \
   --namespace agentgateway-system \
-  --version "${AGW_VERSION}" \
-  --set controller.image.pullPolicy=Always
+  --version "${AGW_VERSION}"
 ```
 
-Verify:
+Verify the controller is running and the `agentgateway` GatewayClass was auto-created:
 
 ```bash
 kubectl get pods -n agentgateway-system
+kubectl get gatewayclass agentgateway
+```
+
+Expected GatewayClass output:
+
+```
+NAME           CONTROLLER                       ACCEPTED   AGE
+agentgateway   agentgateway.dev/agentgateway    True       30s
 ```
 
 ---
@@ -495,12 +503,14 @@ kubectl describe agentgatewaypolicy github-tools-allowlist -n agentgateway-syste
 
 ## References
 
-- [kgateway Documentation](https://kgateway.dev/)
-- [Agentgateway Docs](https://kgateway.dev/docs/integrations/agentgateway/)
-- [MCP Connectivity](https://kgateway.dev/docs/main/agentgateway/mcp/)
-- [kgateway GitHub](https://github.com/kgateway-dev/kgateway)
+- [Agentgateway Docs](https://agentgateway.dev/docs/kubernetes/main/)
+- [Agentgateway Helm install](https://agentgateway.dev/docs/kubernetes/main/install/helm/)
+- [Agentgateway MCP connectivity](https://agentgateway.dev/docs/kubernetes/main/mcp/)
+- [Agentgateway GitHub](https://github.com/agentgateway/agentgateway)
+- [Microsoft Learn MCP Server](https://learn.microsoft.com/en-us/training/support/mcp)
+- [OpenAI Agents SDK – MCP](https://openai.github.io/openai-agents-python/mcp/)
 - [Model Context Protocol](https://modelcontextprotocol.io/)
-- [kgateway v2.1 Release Notes](https://kgateway.dev/blog/kgateway-v2.1-release-blog/)
+- [kgateway (umbrella project)](https://kgateway.dev/)
 
 ---
 

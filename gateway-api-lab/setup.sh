@@ -41,7 +41,9 @@ CILIUM_VERSION="1.19.3"
 METALLB_VERSION="v0.15.3"
 GATEWAY_API_VERSION="v1.5.0"
 ENVOY_GATEWAY_VERSION="v1.7.3"
-KGATEWAY_VERSION="v2.2.4"          # kgateway/agentgateway (AI gateway, separate from Envoy Gateway)
+AGENTGATEWAY_VERSION="v1.1.0"      # agentgateway (AI gateway, separate from Envoy Gateway).
+                                   # As of agentgateway v1.0 the charts live at
+                                   # cr.agentgateway.dev/charts/, decoupled from kgateway.
 
 # Set INSTALL_AGENTGATEWAY=false to skip the AI-gateway step
 INSTALL_AGENTGATEWAY="${INSTALL_AGENTGATEWAY:-true}"
@@ -309,14 +311,17 @@ deploy_httproute() {
 }
 
 # =============================================================================
-# Step 9b (optional): Install Agentgateway (kgateway) + Microsoft Learn MCP
+# Step 9b (optional): Install Agentgateway + Microsoft Learn MCP
 #
 # Agentgateway is a SEPARATE gateway from Envoy Gateway, built specifically
-# for AI/agent traffic (MCP, A2A protocols). It uses its own GatewayClass
-# 'agentgateway' and its own control plane (kgateway). It can coexist with
-# Envoy Gateway in the same cluster.
+# for AI/agent traffic (MCP, A2A protocols). It has its own GatewayClass
+# 'agentgateway' (auto-created by the chart) and its own control plane.
+# It can coexist with Envoy Gateway in the same cluster.
 #
-# This step installs the kgateway control plane, creates an agentgateway
+# Note: as of agentgateway v1.0 the project was decoupled from kgateway.
+# Charts now live at cr.agentgateway.dev/charts/ (not ghcr.io/kgateway-dev).
+#
+# This step installs the agentgateway control plane, creates an agentgateway
 # proxy Gateway, wires the public Microsoft Learn MCP server
 # (https://learn.microsoft.com/api/mcp) as an AgentgatewayBackend, and
 # exposes it on the proxy at the path /mcp-mslearn.
@@ -331,28 +336,32 @@ install_agentgateway() {
         return
     fi
 
-    info "Installing kgateway/agentgateway $KGATEWAY_VERSION..."
+    info "Installing agentgateway $AGENTGATEWAY_VERSION..."
     info "This adds an AI gateway alongside Envoy Gateway for MCP traffic"
 
-    # 1. CRDs first, then controller
-    helm upgrade -i agentgateway-crds oci://ghcr.io/kgateway-dev/charts/agentgateway-crds \
+    # 1. CRDs first (creates the agentgateway-system namespace)
+    helm upgrade -i agentgateway-crds \
+        oci://cr.agentgateway.dev/charts/agentgateway-crds \
         --create-namespace --namespace agentgateway-system \
-        --version "$KGATEWAY_VERSION" \
-        --set controller.image.pullPolicy=Always
+        --version "$AGENTGATEWAY_VERSION"
 
-    helm upgrade -i agentgateway oci://ghcr.io/kgateway-dev/charts/agentgateway \
+    # 2. Control plane
+    helm upgrade -i agentgateway \
+        oci://cr.agentgateway.dev/charts/agentgateway \
         --namespace agentgateway-system \
-        --version "$KGATEWAY_VERSION" \
-        --set controller.image.pullPolicy=Always
+        --version "$AGENTGATEWAY_VERSION"
 
     info "Waiting for agentgateway controller to be Available..."
-    # The controller deployment name varies slightly between releases — wait by label.
     kubectl wait --timeout=5m -n agentgateway-system \
+        --for=condition=Available deployment/agentgateway 2>/dev/null || \
+    kubectl wait --timeout=2m -n agentgateway-system \
         --for=condition=Available deployment \
         -l app.kubernetes.io/name=agentgateway 2>/dev/null || \
-    kubectl wait --timeout=2m -n agentgateway-system \
-        --for=condition=Available deployment/agentgateway 2>/dev/null || \
     sleep 5
+
+    # The chart auto-creates the GatewayClass named 'agentgateway' with
+    # controllerName agentgateway.dev/agentgateway. Wait until it's accepted.
+    kubectl wait --timeout=60s gatewayclass/agentgateway --for=condition=Accepted 2>/dev/null || true
 
     # 2. Create the agentgateway proxy (Gateway resource)
     info "Creating agentgateway proxy Gateway..."
