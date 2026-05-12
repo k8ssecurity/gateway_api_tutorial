@@ -35,12 +35,12 @@ NC='\033[0m' # No Color
 
 # Version Configuration
 # These are pinned to known-working versions for reproducibility
-# Last updated: February 2026
+# Last updated: May 2026
 CLUSTER_NAME="gateway-api-lab"
-CILIUM_VERSION="1.18.6"
+CILIUM_VERSION="1.19.3"
 METALLB_VERSION="v0.15.3"
-GATEWAY_API_VERSION="v1.4.1"
-ENVOY_GATEWAY_VERSION="v1.6.3"
+GATEWAY_API_VERSION="v1.5.0"
+ENVOY_GATEWAY_VERSION="v1.7.3"
 
 # Helper functions for formatted output
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -130,10 +130,21 @@ install_metallb() {
     info "Configuring MetalLB IP pool based on Docker network..."
 
     # Get the Docker network subnet used by KIND
-    KIND_NET_CIDR=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' | head -1)
-    KIND_NET_PREFIX=$(echo $KIND_NET_CIDR | cut -d. -f1-2)
+    # NOTE: On macOS (Docker Desktop), the 'kind' network often has BOTH an IPv4
+    # and an IPv6 subnet. The Go template's {{range}} concatenates them with no
+    # separator, producing garbage like "fc00:f853:ccd:e793::/64172.19.0.0/16".
+    # We insert a newline between entries and grep for the IPv4 CIDR explicitly.
+    KIND_NET_CIDR=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}' \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$' \
+        | head -1)
 
-    info "Detected KIND network: $KIND_NET_CIDR"
+    if [ -z "$KIND_NET_CIDR" ]; then
+        error "Could not determine IPv4 subnet of the Docker 'kind' network."
+    fi
+
+    KIND_NET_PREFIX=$(echo "$KIND_NET_CIDR" | cut -d. -f1-2)
+
+    info "Detected KIND network (IPv4): $KIND_NET_CIDR"
     info "Using IP range: ${KIND_NET_PREFIX}.255.200-${KIND_NET_PREFIX}.255.250"
 
     # Create MetalLB config with dynamic IP range
@@ -309,12 +320,23 @@ configure_hosts() {
         return
     fi
 
+    # macOS-specific: Docker Desktop runs containers in a Linux VM, so the
+    # MetalLB IPs (172.x.x.x on the 'kind' Docker network) are NOT routable
+    # from the macOS host. Map the hostnames to 127.0.0.1 instead and rely on
+    # `kubectl port-forward` (see print_status) to actually reach the gateway.
+    if [ "$(uname -s)" = "Darwin" ]; then
+        HOSTS_TARGET="127.0.0.1"
+        info "macOS detected — pointing hostnames at 127.0.0.1 (use kubectl port-forward to test)"
+    else
+        HOSTS_TARGET="$GATEWAY_IP"
+    fi
+
     # Check if entries already exist
     if grep -q "webapp.local.dev" /etc/hosts; then
         warn "Host entries already exist. Skipping..."
     else
         echo "Adding entries to /etc/hosts (requires sudo)..."
-        echo "$GATEWAY_IP webapp.local.dev api.local.dev" | sudo tee -a /etc/hosts
+        echo "$HOSTS_TARGET webapp.local.dev api.local.dev" | sudo tee -a /etc/hosts
     fi
 
     success "Hosts configured!"
@@ -333,20 +355,53 @@ print_status() {
 
     GATEWAY_IP=$(kubectl get gateway/eg-gateway -n envoy-gateway-system -o jsonpath='{.status.addresses[0].value}' 2>/dev/null)
 
-    echo "Gateway IP: $GATEWAY_IP"
+    echo "Gateway IP (inside Docker 'kind' network): $GATEWAY_IP"
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "Test Commands:"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    echo "  # HTTP test (if /etc/hosts configured):"
-    echo "  curl http://webapp.local.dev/"
-    echo ""
-    echo "  # HTTP test (using Host header):"
-    echo "  curl -H 'Host: webapp.local.dev' http://$GATEWAY_IP/"
-    echo ""
-    echo "  # HTTPS test (self-signed cert, use -k to skip verification):"
-    echo "  curl -k https://webapp.local.dev/"
+
+    if [ "$(uname -s)" = "Darwin" ]; then
+        # macOS: MetalLB IPs (172.x.x.x) are inside Docker Desktop's Linux VM
+        # and not routable from the Mac host. Use port-forward instead.
+        cat <<EOF
+  # macOS NOTE: the Gateway IP ($GATEWAY_IP) is NOT reachable from your Mac
+  # because Docker Desktop runs containers inside a Linux VM.
+  # Use ONE of the following approaches to test:
+
+  # Option 1 — kubectl port-forward (recommended, terminal stays busy):
+  #   In terminal A:
+  #     SVC=\$(kubectl -n envoy-gateway-system get svc \\
+  #       -l gateway.envoyproxy.io/owning-gateway-name=eg-gateway \\
+  #       -o jsonpath='{.items[0].metadata.name}')
+  #     kubectl -n envoy-gateway-system port-forward svc/\$SVC 8080:80 8443:443
+  #   In terminal B:
+  #     curl -H 'Host: webapp.local.dev' http://localhost:8080/
+  #     curl -k -H 'Host: webapp.local.dev' https://localhost:8443/
+
+  # Option 2 — docker exec from inside a kind node (no port-forward needed):
+  #   docker exec ${CLUSTER_NAME}-control-plane \\
+  #     curl -s -H 'Host: webapp.local.dev' http://$GATEWAY_IP/
+
+  # Option 3 — Hostname via /etc/hosts entry (works if mapped to 127.0.0.1
+  # AND a port-forward on :80/:443 is active, or if you're using OrbStack
+  # which routes the Docker network to the host):
+  #   curl http://webapp.local.dev/
+  #   curl -k https://webapp.local.dev/
+EOF
+    else
+        cat <<EOF
+  # HTTP test (if /etc/hosts configured):
+  curl http://webapp.local.dev/
+
+  # HTTP test (using Host header):
+  curl -H 'Host: webapp.local.dev' http://$GATEWAY_IP/
+
+  # HTTPS test (self-signed cert, use -k to skip verification):
+  curl -k https://webapp.local.dev/
+EOF
+    fi
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "View Resources:"

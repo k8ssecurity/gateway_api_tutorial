@@ -9,6 +9,7 @@ A complete hands-on guide to deploying the Kubernetes Gateway API with Envoy Gat
 - [Overview](#overview)
 - [Key Concepts](#key-concepts)
 - [Prerequisites](#prerequisites)
+- [Quick Start (Automated)](#quick-start-automated)
 - [Part 1: Environment Setup](#part-1-environment-setup)
 - [Part 2: Create KIND Cluster with Cilium](#part-2-create-kind-cluster-with-cilium)
 - [Part 3: Install MetalLB for LoadBalancer Support](#part-3-install-metallb-for-loadbalancer-support)
@@ -94,6 +95,40 @@ Before starting, ensure you have the following installed:
 | helm | 3.12+ | Kubernetes package manager |
 | cilium CLI | 0.15+ | Cilium installation and management |
 | openssl | any | For generating TLS certificates |
+
+---
+
+## Quick Start (Automated)
+
+If you just want a working environment to play with, the repository ships an end-to-end installer that wraps every step described below. It is the fastest path to a usable cluster and is what we recommend for first-time runs — read through the manual sections afterwards to understand what it did.
+
+```bash
+cd gateway-api-lab
+./setup.sh
+```
+
+What `setup.sh` does, in order:
+
+1. Verifies that `docker`, `kubectl`, `kind`, `helm`, and `cilium` are installed and that Docker is running.
+2. Creates a 3-node KIND cluster from `01-kind-config.yaml` (deleting any pre-existing cluster with the same name).
+3. Installs Cilium as the CNI with kube-proxy replacement enabled.
+4. Installs MetalLB and configures an L2 IP pool derived from the actual `kind` Docker network — picking the IPv4 subnet explicitly so it works on macOS Docker Desktop too (the bridge there carries both an IPv4 and an IPv6 subnet, and a naive template concatenates them).
+5. Installs the Gateway API CRDs (Experimental channel — gives you TLSRoute) and the Envoy Gateway controller via Helm.
+6. Generates a self-signed cert for `*.local.dev`, stores it as a Secret, and applies the `Gateway` from `03-gateway.yaml`.
+7. Deploys the sample stable and canary apps and a basic `HTTPRoute`.
+8. Writes a `webapp.local.dev` / `api.local.dev` entry to `/etc/hosts` (requires `sudo`). On macOS this points at `127.0.0.1` because MetalLB IPs are not routable from the host; on Linux it points directly at the Gateway IP.
+9. Prints platform-appropriate test commands (see [Part 6](#part-6-testing-http-and-https)).
+
+Pinned versions (kept current — last refreshed May 2026):
+
+```bash
+CILIUM_VERSION="1.19.3"
+METALLB_VERSION="v0.15.3"
+GATEWAY_API_VERSION="v1.5.0"
+ENVOY_GATEWAY_VERSION="v1.7.3"
+```
+
+If anything fails partway through, re-running `./setup.sh` is safe — it deletes the existing cluster and starts fresh.
 
 ---
 
@@ -260,7 +295,7 @@ Cilium provides the network connectivity between pods. Without a CNI, pods can't
 # Install Cilium with kube-proxy replacement
 # This takes 2-3 minutes as it downloads and starts the Cilium agents
 cilium install \
-  --version 1.18.6 \
+  --version 1.19.3 \
   --set kubeProxyReplacement=true \
   --set k8sServiceHost=gateway-api-lab-control-plane \
   --set k8sServicePort=6443
@@ -314,11 +349,18 @@ kubectl wait --namespace metallb-system \
 MetalLB needs to know what IP range it can use. We'll use IPs from the KIND Docker network.
 
 ```bash
-# Get the KIND network subnet (usually 172.18.0.0/16 or similar)
-docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+# Get the IPv4 subnet of the 'kind' Docker network.
+#
+# NOTE: On macOS Docker Desktop the 'kind' network has BOTH an IPv4 and an
+# IPv6 subnet. The Go template's {{range}} concatenates them with no
+# separator and produces garbage like "fc00:f853:ccd:e793::/64172.19.0.0/16".
+# We insert a newline between entries and grep for the IPv4 CIDR explicitly.
+docker network inspect kind \
+  -f '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}' \
+  | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$'
 ```
 
-This typically returns something like `172.18.0.0/16`.
+This typically returns something like `172.18.0.0/16` or `172.19.0.0/16` depending on whether other Docker networks already exist. Note the first two octets — you'll plug them into the IPAddressPool below.
 
 ### Step 3.3: Configure MetalLB IP Pool
 
@@ -367,14 +409,14 @@ Envoy Gateway is the software that actually handles incoming traffic and routes 
 
 First, we install the Gateway API Custom Resource Definitions (CRDs). These define the new resource types (Gateway, HTTPRoute, TLSRoute, etc.) that Kubernetes will understand.
 
-We use the **Experimental** channel to get TLSRoute support (for TLS passthrough routing):
-- **Standard channel**: GatewayClass, Gateway, HTTPRoute, GRPCRoute
-- **Experimental channel**: All standard + TLSRoute, TCPRoute, UDPRoute
+We use the **Experimental** channel to get the full set of route types up front. As of Gateway API v1.5.0 the standard channel actually includes TLSRoute and ListenerSet too, but we stay on Experimental for TCPRoute, UDPRoute, and any future additions you may want to experiment with:
+- **Standard channel** (as of v1.5.0): GatewayClass, Gateway, HTTPRoute, GRPCRoute, TLSRoute, ListenerSet
+- **Experimental channel**: All standard + TCPRoute, UDPRoute, plus in-progress features
 
 ```bash
-# Install the EXPERIMENTAL Gateway API CRDs (includes TLSRoute)
+# Install the EXPERIMENTAL Gateway API CRDs (includes TCPRoute/UDPRoute)
 # Use --server-side to handle large CRD manifests
-kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/experimental-install.yaml
+kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.0/experimental-install.yaml
 
 # Verify CRDs are installed
 kubectl get crds | grep gateway
@@ -400,7 +442,7 @@ Now we install the Envoy Gateway controller. This watches for Gateway resources 
 # Install Envoy Gateway
 # --skip-crds because we already installed Gateway API CRDs above
 helm install eg oci://docker.io/envoyproxy/gateway-helm \
-  --version v1.6.3 \
+  --version v1.7.3 \
   -n envoy-gateway-system \
   --create-namespace \
   --skip-crds
@@ -636,56 +678,116 @@ kubectl get pods -n demo-app
 
 ## Part 6: Testing HTTP and HTTPS
 
-Now let's verify everything works by sending requests to our Gateway.
+How you reach the Gateway depends on your operating system. On Linux the MetalLB IP lives directly on the Docker bridge and is reachable from your shell. On macOS the bridge is hidden behind Docker Desktop's Linux VM, so the MetalLB IP is **not** routable from the host — you need to either tunnel into it with `kubectl port-forward` or exec into a kind node.
 
-### Test HTTP (Port 80)
+Pick the matching subsection below.
+
+### 6.A — Testing on Linux
+
+This is the "just works" path. The MetalLB Gateway IP is reachable directly because the Docker bridge is on the host network.
 
 ```bash
-# Simple HTTP request
+# HTTP
 curl http://$GATEWAY_IP/
-```
 
-Expected output:
-```
-Hello from Gateway API!
-```
+# HTTP via hostname (assuming setup.sh wrote /etc/hosts pointing at $GATEWAY_IP)
+curl http://webapp.local.dev/
 
-### Test HTTPS (Port 443)
-
-```bash
-# HTTPS request (-k skips certificate validation for self-signed certs)
+# HTTPS (-k skips cert validation for the self-signed cert)
 curl -k https://$GATEWAY_IP/
-```
+curl -k https://webapp.local.dev/
 
-Expected output:
-```
-Hello from Gateway API!
-```
-
-### Test HTTPS with Verbose Output
-
-To see the TLS handshake details:
-
-```bash
+# See the TLS handshake
 curl -kv https://$GATEWAY_IP/ 2>&1 | grep -E "(SSL|subject|issuer|expire)"
-```
 
-### View the TLS Certificate
+# Inspect the certificate the Gateway is presenting
+echo | openssl s_client -connect $GATEWAY_IP:443 2>/dev/null \
+  | openssl x509 -text -noout | head -20
 
-```bash
-echo | openssl s_client -connect $GATEWAY_IP:443 2>/dev/null | openssl x509 -text -noout | head -20
-```
-
-### Test Load Balancing
-
-Make multiple requests to see responses from different pods:
-
-```bash
+# Load balancing — repeat a few times, you'll hit different stable pods
 for i in {1..5}; do
   echo "Request $i:"
   curl -s http://$GATEWAY_IP/
 done
 ```
+
+Expected response body for all of the above:
+
+```
+Hello from Gateway API!
+```
+
+### 6.B — Testing on macOS
+
+The MetalLB IP (`172.x.x.x`) is **not reachable from your Mac terminal** — Docker Desktop runs the bridge inside its Linux VM. You have three good options.
+
+#### Option 1 — `kubectl port-forward` (recommended)
+
+In one terminal, find the Envoy proxy Service that backs the Gateway and forward its ports to localhost:
+
+```bash
+# Find the Envoy proxy Service backing the Gateway
+SVC=$(kubectl -n envoy-gateway-system get svc \
+  -l gateway.envoyproxy.io/owning-gateway-name=eg-gateway \
+  -o jsonpath='{.items[0].metadata.name}')
+
+# Forward host :8080 → service :80 and host :8443 → service :443
+kubectl -n envoy-gateway-system port-forward svc/$SVC 8080:80 8443:443
+```
+
+Leave that running. In a second terminal:
+
+```bash
+# Plain HTTP
+curl -H 'Host: webapp.local.dev' http://localhost:8080/
+
+# HTTPS
+curl -k -H 'Host: webapp.local.dev' https://localhost:8443/
+
+# If setup.sh wrote 127.0.0.1 webapp.local.dev to /etc/hosts (macOS default),
+# you can use the hostname directly:
+curl http://webapp.local.dev:8080/
+curl -k https://webapp.local.dev:8443/
+```
+
+#### Option 2 — `docker exec` from inside a kind node
+
+The kind nodes are containers on the same Docker network MetalLB advertises into, so they reach the Gateway IP directly:
+
+```bash
+# One-shot HTTP request
+docker exec gateway-api-lab-control-plane \
+  curl -s -H 'Host: webapp.local.dev' http://$GATEWAY_IP/
+
+# One-shot HTTPS request
+docker exec gateway-api-lab-control-plane \
+  curl -sk -H 'Host: webapp.local.dev' https://$GATEWAY_IP/
+
+# Interactive shell inside the node (useful when iterating)
+docker exec -it gateway-api-lab-control-plane bash
+# then:
+curl -H 'Host: webapp.local.dev' http://172.x.x.x/
+```
+
+#### Option 3 — OrbStack (or a custom route)
+
+If you replace Docker Desktop with [OrbStack](https://orbstack.dev/), it routes Docker bridge networks to the host transparently and the Linux test commands in 6.A "just work". Same effect if you install `docker-mac-net-connect` or add a manual route to `172.x.x.x/16` through the Docker VM — but most people will find OrbStack the simplest swap.
+
+#### Inspecting the TLS certificate on macOS
+
+Substitute `localhost:8443` (with port-forward running) or run the command from inside a kind node:
+
+```bash
+# Via port-forward
+echo | openssl s_client -connect localhost:8443 -servername webapp.local.dev 2>/dev/null \
+  | openssl x509 -text -noout | head -20
+
+# Via docker exec
+docker exec gateway-api-lab-control-plane sh -c \
+  "echo | openssl s_client -connect $GATEWAY_IP:443 -servername webapp.local.dev 2>/dev/null | openssl x509 -text -noout | head -20"
+```
+
+> **Note on Part 7 examples:** The advanced routing tests later in this tutorial use `$GATEWAY_IP` directly. On macOS, wrap each of those `curl` commands using one of the three options above — e.g. `docker exec gateway-api-lab-control-plane curl ...` or run them while a port-forward is active and target `localhost:8080` / `localhost:8443`.
 
 ---
 
@@ -1138,7 +1240,7 @@ kubectl logs -n kube-system -l k8s-app=cilium --tail=50
 
 # Reinstall Cilium if needed
 cilium uninstall
-cilium install --version 1.18.6 --set kubeProxyReplacement=true
+cilium install --version 1.19.3 --set kubeProxyReplacement=true
 ```
 
 ### Gateway Has No External IP
@@ -1215,9 +1317,21 @@ kubectl get pods -n demo-app
 # --- Get Gateway IP ---
 export GATEWAY_IP=$(kubectl get gateway/eg-gateway -n envoy-gateway-system -o jsonpath='{.status.addresses[0].value}')
 
-# --- Test Connectivity ---
-curl http://$GATEWAY_IP/           # HTTP
-curl -k https://$GATEWAY_IP/       # HTTPS
+# --- Test Connectivity (Linux: direct; macOS: via port-forward or docker exec) ---
+curl http://$GATEWAY_IP/           # HTTP        — Linux only
+curl -k https://$GATEWAY_IP/       # HTTPS       — Linux only
+
+# macOS: forward Envoy proxy ports first, then curl localhost
+SVC=$(kubectl -n envoy-gateway-system get svc \
+  -l gateway.envoyproxy.io/owning-gateway-name=eg-gateway \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl -n envoy-gateway-system port-forward svc/$SVC 8080:80 8443:443 &
+curl -H 'Host: webapp.local.dev' http://localhost:8080/
+curl -k -H 'Host: webapp.local.dev' https://localhost:8443/
+
+# macOS alternative: run curl from inside a kind node
+docker exec gateway-api-lab-control-plane \
+  curl -s -H 'Host: webapp.local.dev' http://$GATEWAY_IP/
 
 # --- View Logs ---
 kubectl logs -n envoy-gateway-system deployment/envoy-gateway --tail=50
@@ -1238,7 +1352,7 @@ kind delete cluster --name gateway-api-lab
 
 ---
 
-*Tutorial updated February 2026 | Envoy Gateway v1.6.3 | Cilium v1.18.6 | Gateway API v1.4.1 (Experimental)*
+*Tutorial updated May 2026 | Envoy Gateway v1.7.3 | Cilium v1.19.3 | Gateway API v1.5.0 (Experimental) | MetalLB v0.15.3*
 
 ---
 
