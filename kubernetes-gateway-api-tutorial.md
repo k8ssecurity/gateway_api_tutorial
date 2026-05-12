@@ -769,10 +769,6 @@ docker exec -it gateway-api-lab-control-plane bash
 curl -H 'Host: webapp.local.dev' http://172.x.x.x/
 ```
 
-#### Option 3 — OrbStack (or a custom route)
-
-If you replace Docker Desktop with [OrbStack](https://orbstack.dev/), it routes Docker bridge networks to the host transparently and the Linux test commands in 6.A "just work". Same effect if you install `docker-mac-net-connect` or add a manual route to `172.x.x.x/16` through the Docker VM — but most people will find OrbStack the simplest swap.
-
 #### Inspecting the TLS certificate on macOS
 
 Substitute `localhost:8443` (with port-forward running) or run the command from inside a kind node:

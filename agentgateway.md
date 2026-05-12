@@ -131,7 +131,6 @@ kubectl get gateway,deployment,svc -n agentgateway-system
 | Linux | `kubectl port-forward` | `kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 8080:80` |
 | macOS | `kubectl port-forward` (required — MetalLB IP is not routable from the host) | `kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 8080:80` |
 | macOS | `docker exec` into a kind node | `docker exec gateway-api-lab-control-plane curl ...` against the MetalLB IP |
-| macOS | OrbStack | Linux commands "just work" |
 
 For the OpenAI Agents SDK test in Section 5, **use port-forward on both platforms** so the script can target `http://localhost:8080/`.
 

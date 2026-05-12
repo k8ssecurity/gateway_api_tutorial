@@ -83,7 +83,6 @@ On macOS, Docker Desktop runs containers inside a Linux VM. The MetalLB IPs are 
 
 1. `kubectl port-forward` — works everywhere, recommended.
 2. `docker exec gateway-api-lab-control-plane curl ...` — runs the request from inside the kind network.
-3. [OrbStack](https://orbstack.dev/) instead of Docker Desktop — it routes Docker bridges to the host so the Linux commands "just work" on Mac too.
 
 Both tutorials and `setup.sh`'s final output show concrete examples for each path.
 

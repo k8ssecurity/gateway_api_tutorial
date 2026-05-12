@@ -458,9 +458,8 @@ print_status() {
   #   docker exec ${CLUSTER_NAME}-control-plane \\
   #     curl -s -H 'Host: webapp.local.dev' http://$GATEWAY_IP/
 
-  # Option 3 — Hostname via /etc/hosts entry (works if mapped to 127.0.0.1
-  # AND a port-forward on :80/:443 is active, or if you're using OrbStack
-  # which routes the Docker network to the host):
+  # Option 3 — Hostname via /etc/hosts entry (works once /etc/hosts maps
+  # webapp.local.dev to 127.0.0.1 AND a port-forward on :80/:443 is active):
   #   curl http://webapp.local.dev/
   #   curl -k https://webapp.local.dev/
 EOF
