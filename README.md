@@ -18,10 +18,11 @@ After `./setup.sh` you have a working cluster with:
 
 ## Where to read next
 
-- [`kubernetes-gateway-api-tutorial.md`](kubernetes-gateway-api-tutorial.md) — main tutorial. Walks through the cluster, Cilium, MetalLB, Envoy Gateway, the sample app, and the HTTPRoute/TLSRoute examples. Includes a Quick Start section and explicit macOS vs Linux testing paths.
-- [`agentgateway.md`](agentgateway.md) — the AI-gateway extension. Installs agentgateway alongside Envoy Gateway, wires Microsoft Learn MCP as an `AgentgatewayBackend`, and validates the path end-to-end with the OpenAI Agents SDK. Read this after the main tutorial.
+- [`testing.md`](testing.md) — **quick guide for driving the lab after `./setup.sh`**. Covers both the Envoy Gateway sample webapp and the agentgateway/Microsoft Learn MCP path, with separate macOS and Linux paths and a small troubleshooting section. Start here if you just want to verify everything works.
+- [`kubernetes-gateway-api-tutorial.md`](kubernetes-gateway-api-tutorial.md) — full tutorial. Walks through the cluster, Cilium, MetalLB, Envoy Gateway, the sample app, and the HTTPRoute/TLSRoute examples step by step. Read this if you want to understand what `setup.sh` did under the hood.
+- [`agentgateway.md`](agentgateway.md) — the AI-gateway extension explained. Installs agentgateway alongside Envoy Gateway, wires Microsoft Learn MCP as an `AgentgatewayBackend`, and discusses tool gating with `AgentgatewayPolicy`. Read this after the main tutorial.
 
-Both docs assume the same lab folder, so the cluster you build in the first tutorial is the one extended in the second.
+All three docs assume the same lab folder, so the cluster you build with the first tutorial is the one you test in the second and extend in the third.
 
 ## Quick start
 
@@ -43,6 +44,7 @@ INSTALL_AGENTGATEWAY=false ./setup.sh
 ```
 .
 ├── README.md                              ← you are here
+├── testing.md                             ← how to test after setup.sh (macOS + Linux)
 ├── kubernetes-gateway-api-tutorial.md     ← Envoy Gateway walkthrough
 ├── agentgateway.md                        ← Agentgateway / MCP walkthrough
 └── gateway-api-lab/
