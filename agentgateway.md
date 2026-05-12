@@ -38,48 +38,37 @@ You can run **both** in the same cluster - they use different GatewayClasses and
 ## Prerequisites
 
 This guide assumes you already have:
-- A working KIND cluster (from the Gateway API tutorial)
+- A working KIND cluster (from the Gateway API tutorial — `./setup.sh` in `gateway-api-lab/`)
+- Gateway API CRDs installed (the tutorial installs the Experimental channel of v1.5.0)
 - MetalLB installed and configured (so `LoadBalancer` Services get an IP)
 - `kubectl` and `helm` installed
 
 ---
 
-## 1) Install Gateway API CRDs
+## Automated install (recommended)
 
-If you already did this in the Gateway API tutorial in this repo, you can skip.
+As of May 2026, `gateway-api-lab/setup.sh` installs agentgateway and wires the Microsoft Learn MCP server automatically. Running `./setup.sh` with the default `INSTALL_AGENTGATEWAY=true` does steps 1, 2, 3 and 4 of this doc for you. Skip to [Section 5](#5-test-with-the-openai-agents-sdk) if you used the script.
+
+To skip the AI-gateway step explicitly:
 
 ```bash
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml
+INSTALL_AGENTGATEWAY=false ./setup.sh
 ```
 
-Optional (only if you need experimental Gateway API features later):
-```bash
-kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/experimental-install.yaml
-```
+The sections below walk through what `setup.sh` does and how to do it by hand.
 
 ---
 
-## 2) Install agentgateway (control plane)
+## 1) Install agentgateway (control plane)
 
-Pick a version and reuse it consistently.
-
-### Version Options (February 2026)
-
-| Version | Channel | Status |
-|---------|---------|--------|
-| `v2.1.x` | Stable | Production-ready, first version with agentgateway integration |
-| `v2.2.0-main` | Development | Latest features, may have breaking changes |
-| `v2.2.0-rc.x` | Release Candidate | Pre-release testing |
+The agentgateway control plane is delivered by the **kgateway** project. As of May 2026 the latest stable line is **v2.2.x**; we pin v2.2.4 below.
 
 ```bash
-# Development version (latest features)
-export AGW_VERSION=v2.2.0-main
-
-# Or use the stable version for production:
-# export AGW_VERSION=v2.1.0
+export AGW_VERSION=v2.2.4
 ```
 
-Install the agentgateway CRDs:
+Install the CRDs:
+
 ```bash
 helm upgrade -i agentgateway-crds oci://ghcr.io/kgateway-dev/charts/agentgateway-crds \
   --create-namespace --namespace agentgateway-system \
@@ -87,7 +76,8 @@ helm upgrade -i agentgateway-crds oci://ghcr.io/kgateway-dev/charts/agentgateway
   --set controller.image.pullPolicy=Always
 ```
 
-Install the agentgateway control plane:
+Install the controller:
+
 ```bash
 helm upgrade -i agentgateway oci://ghcr.io/kgateway-dev/charts/agentgateway \
   --namespace agentgateway-system \
@@ -96,17 +86,19 @@ helm upgrade -i agentgateway oci://ghcr.io/kgateway-dev/charts/agentgateway \
 ```
 
 Verify:
+
 ```bash
 kubectl get pods -n agentgateway-system
 ```
 
 ---
 
-## 3) Create an agentgateway proxy (Gateway)
+## 2) Create an agentgateway proxy (Gateway)
 
 This creates:
+
 - a `Gateway` named `agentgateway-proxy`
-- a `Deployment` and `Service` also named `agentgateway-proxy` in `agentgateway-system`
+- a backing `Deployment` and `Service` of the same name in `agentgateway-system`
 
 ```bash
 kubectl apply -f- <<'EOF'
@@ -118,38 +110,41 @@ metadata:
 spec:
   gatewayClassName: agentgateway
   listeners:
-  - protocol: HTTP
-    port: 80
-    name: http
-    allowedRoutes:
-      namespaces:
-        from: All
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
 EOF
+
+kubectl wait --timeout=5m -n agentgateway-system \
+  gateway/agentgateway-proxy --for=condition=Programmed
 ```
 
-Check status:
+Inspect:
+
 ```bash
-kubectl get gateway agentgateway-proxy -n agentgateway-system
-kubectl get deployment agentgateway-proxy -n agentgateway-system
-kubectl get svc agentgateway-proxy -n agentgateway-system
+kubectl get gateway,deployment,svc -n agentgateway-system
 ```
 
-### Access method A: Use MetalLB EXTERNAL-IP
-If the Service gets an EXTERNAL-IP, you can use it directly:
-```bash
-kubectl get svc -n agentgateway-system agentgateway-proxy
-```
+### Access methods
 
-### Access method B: Port-forward (always works for local testing)
-```bash
-kubectl port-forward deployment/agentgateway-proxy -n agentgateway-system 8080:80
-```
+| Platform | Method | Command |
+|---|---|---|
+| Linux | MetalLB EXTERNAL-IP (direct) | `kubectl get svc -n agentgateway-system agentgateway-proxy` then curl the IP |
+| Linux | `kubectl port-forward` | `kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 8080:80` |
+| macOS | `kubectl port-forward` (required — MetalLB IP is not routable from the host) | `kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 8080:80` |
+| macOS | `docker exec` into a kind node | `docker exec gateway-api-lab-control-plane curl ...` against the MetalLB IP |
+| macOS | OrbStack | Linux commands "just work" |
+
+For the OpenAI Agents SDK test in Section 5, **use port-forward on both platforms** so the script can target `http://localhost:8080/`.
 
 ---
 
-## 4) Option A: Route to a local MCP server (static MCP)
+## 3) Option A: Route to a local MCP server (static MCP)
 
-### 4.1 Deploy a sample MCP server (website fetcher)
+### 3.1 Deploy a sample MCP server (website fetcher)
 
 ```bash
 kubectl apply -f- <<'EOF'
@@ -187,7 +182,7 @@ spec:
 EOF
 ```
 
-### 4.2 Create an AgentgatewayBackend
+### 3.2 Create an AgentgatewayBackend
 
 ```bash
 kubectl apply -f- <<'EOF'
@@ -206,7 +201,7 @@ spec:
 EOF
 ```
 
-### 4.3 Create an HTTPRoute to the MCP backend
+### 3.3 Create an HTTPRoute to the MCP backend
 
 ```bash
 kubectl apply -f- <<'EOF'
@@ -226,7 +221,7 @@ spec:
 EOF
 ```
 
-### 4.4 Verify with MCP Inspector
+### 3.4 Verify with MCP Inspector
 
 In another terminal, keep port-forward running:
 ```bash
@@ -244,100 +239,144 @@ Connect:
 
 ---
 
-## 5) Option B: Route to the remote GitHub MCP server via HTTPS (multi-tool server)
+## 4) Option B: Route to the remote Microsoft Learn MCP server (HTTPS, anonymous)
 
-This is useful to see many tools and then test allow/deny rules.
+[Microsoft Learn MCP](https://learn.microsoft.com/en-us/training/support/mcp) is a public, anonymous streamable-HTTP MCP server hosted at `https://learn.microsoft.com/api/mcp`. It exposes tools for searching Microsoft documentation and fetching articles and code samples. No API key, no PAT — it just works.
 
-### 5.1 Create a GitHub Personal Access Token
-Create a PAT and export it:
+This is what `setup.sh` configures automatically. The two manifests below are the same ones the script applies.
 
-```bash
-export GH_PAT="<your-personal-access-token>"
-```
-
-### 5.2 Create an AgentgatewayBackend for GitHub MCP
+### 4.1 Create an AgentgatewayBackend for Microsoft Learn MCP
 
 ```bash
 kubectl apply -f- <<'EOF'
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayBackend
 metadata:
-  name: github-mcp-backend
+  name: mslearn-mcp-backend
   namespace: agentgateway-system
 spec:
   mcp:
     targets:
-    - name: mcp-target
-      static:
-        host: api.githubcopilot.com
-        port: 443
-        path: /mcp/
-        policies:
-          tls:
-            sni: api.githubcopilot.com
+      - name: mslearn-target
+        static:
+          host: learn.microsoft.com
+          port: 443
+          path: /api/mcp
+          protocol: StreamableHTTP
+          policies:
+            tls:
+              sni: learn.microsoft.com
 EOF
 ```
 
-### 5.3 Create an HTTPRoute at `/mcp-github`
+Notes on the fields:
+- `protocol: StreamableHTTP` — Microsoft Learn MCP uses the MCP streamable-HTTP transport (one HTTP endpoint that can upgrade to SSE for streaming responses). The other valid value is `SSE` for SSE-only upstreams.
+- `path: /api/mcp` — the path on the upstream where the MCP endpoint lives.
+- `policies.tls.sni` — required because Microsoft's load balancer relies on SNI to route to the right backend.
 
-This sets CORS and injects the GitHub PAT as an Authorization header.
-
-> **Note:** The `CORS` filter type is a kgateway extension, not part of standard Gateway API. It works with kgateway/agentgateway but won't work with other Gateway API implementations like Envoy Gateway.
+### 4.2 Create an HTTPRoute at `/mcp-mslearn`
 
 ```bash
-kubectl apply -f- <<EOF
+kubectl apply -f- <<'EOF'
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: mcp-github
+  name: mcp-mslearn
   namespace: agentgateway-system
 spec:
   parentRefs:
-  - name: agentgateway-proxy
-    namespace: agentgateway-system
+    - name: agentgateway-proxy
+      namespace: agentgateway-system
   rules:
     - matches:
         - path:
             type: PathPrefix
-            value: /mcp-github
-      filters:
-        - type: CORS
-          cors:
-            allowHeaders:
-              - "*"
-            allowMethods:
-              - "*"
-            allowOrigins:
-              - "http://localhost:8080"
-        - type: RequestHeaderModifier
-          requestHeaderModifier:
-            set:
-              - name: Authorization
-                value: "Bearer ${GH_PAT}"
+            value: /mcp-mslearn
       backendRefs:
-      - name: github-mcp-backend
-        group: agentgateway.dev
-        kind: AgentgatewayBackend
+        - name: mslearn-mcp-backend
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
 EOF
 ```
 
-### 5.4 Verify with MCP Inspector
+Clients now reach Microsoft Learn MCP at `http://<agentgateway-proxy>/mcp-mslearn`.
 
-Port-forward:
+---
+
+## 5) Test with the OpenAI Agents SDK
+
+The Microsoft Learn docs explicitly recommend using an agent framework rather than calling the MCP endpoint directly. We use the [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/) for this, which has first-class support for streamable-HTTP MCP servers via `MCPServerStreamableHttp`.
+
+### 5.1 Port-forward (both macOS and Linux)
+
+The agentgateway proxy Service has a MetalLB EXTERNAL-IP, but on macOS that IP is not reachable from your host (Docker Desktop runs containers inside a Linux VM). The simplest cross-platform option is port-forward — keep it running in a dedicated terminal:
+
 ```bash
-kubectl port-forward deployment/agentgateway-proxy -n agentgateway-system 8080:80
+kubectl -n agentgateway-system port-forward \
+  deployment/agentgateway-proxy 8080:80
 ```
 
-Run inspector:
+On Linux you can alternatively curl the MetalLB IP directly, but port-forward keeps the rest of this section identical between platforms.
+
+### 5.2 Install the OpenAI Agents SDK and export your API key
+
 ```bash
-npx modelcontextprotocol/inspector#0.18.0
+pip install --upgrade openai-agents
+export OPENAI_API_KEY=sk-...
 ```
 
-Connect:
-- Transport Type: Streamable HTTP
-- URL: `http://localhost:8080/mcp-github`
+### 5.3 Run the included test client
 
-Then go to Tools and click List Tools.
+`gateway-api-lab/test-mslearn-agent.py` connects to `http://localhost:8080/mcp-mslearn`, asks the agent a Microsoft-docs question, and prints the answer. Reproduced here for reference — see the file in the repo for the runnable copy:
+
+```python
+import asyncio, os, sys
+from agents import Agent, Runner
+from agents.mcp import MCPServerStreamableHttp
+
+async def main():
+    async with MCPServerStreamableHttp(
+        name="Microsoft Learn Docs",
+        params={"url": "http://localhost:8080/mcp-mslearn", "timeout": 30},
+        cache_tools_list=True,
+    ) as mcp_server:
+        tools = await mcp_server.list_tools()
+        print("Tools:", ", ".join(t.name for t in tools), file=sys.stderr)
+
+        agent = Agent(
+            name="Microsoft docs assistant",
+            instructions=(
+                "Use Microsoft Learn MCP tools to search official docs "
+                "before answering. Cite the URLs you used."
+            ),
+            model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+            mcp_servers=[mcp_server],
+        )
+        result = await Runner.run(
+            agent,
+            "What is Azure App Service and what languages does it support?",
+        )
+        print(result.final_output)
+
+asyncio.run(main())
+```
+
+Run it:
+
+```bash
+cd gateway-api-lab
+python3 test-mslearn-agent.py
+```
+
+What you should see:
+
+1. A short line on stderr listing the tools Microsoft Learn MCP exposes — typically `microsoft_docs_search`, `microsoft_docs_fetch`, plus one or two related tools.
+2. A multi-paragraph answer that quotes specific Microsoft Learn URLs.
+
+If the Agent hangs or the tool list is empty, the most common causes are:
+- Port-forward isn't running (or is binding a different port).
+- The `mslearn-mcp-backend` AgentgatewayBackend is missing `protocol: StreamableHTTP`, in which case agentgateway defaults to SSE and silently fails the streamable-HTTP handshake.
+- Egress from the cluster to `learn.microsoft.com:443` is blocked (rare for local KIND, common in corporate environments).
 
 ---
 
@@ -345,33 +384,33 @@ Then go to Tools and click List Tools.
 
 By default, all MCP tools are allowed. To restrict tools, attach an `AgentgatewayPolicy` to the backend and add CEL expressions.
 
-### 6.1 Example: allow only a single tool (by name)
+### 6.1 Example: allow only doc search on Microsoft Learn MCP
 
-This example allows only the `get_me` tool on the GitHub MCP backend:
+This restricts the Microsoft Learn backend to a single tool — `microsoft_docs_search`. Re-running the OpenAI Agents SDK test from Section 5 after applying the policy will show only that tool in `mcp_server.list_tools()`, and the agent will be unable to fetch full articles or code samples.
 
 ```bash
 kubectl apply -f- <<'EOF'
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayPolicy
 metadata:
-  name: github-tools-allowlist
+  name: mslearn-tools-allowlist
   namespace: agentgateway-system
 spec:
   targetRefs:
     - group: agentgateway.dev
       kind: AgentgatewayBackend
-      name: github-mcp-backend
+      name: mslearn-mcp-backend
   backend:
     mcp:
       authorization:
         action: Allow
         policy:
           matchExpressions:
-            - 'mcp.tool.name == "get_me"'
+            - 'mcp.tool.name == "microsoft_docs_search"'
 EOF
 ```
 
-Re-connect in MCP Inspector and click List Tools again. You should only see the allowed tool.
+Re-run `python3 test-mslearn-agent.py` (or reconnect in MCP Inspector) — the tool list should now contain only `microsoft_docs_search`.
 
 ### 6.2 Policy-as-code (programmatic management)
 
@@ -389,8 +428,8 @@ kubectl get agentgatewaypolicies -A
 kubectl apply -f ./policies/
 
 # quick patch example (change the match expression)
-kubectl patch agentgatewaypolicy github-tools-allowlist -n agentgateway-system --type='json' \
-  -p='[{"op":"replace","path":"/spec/backend/mcp/authorization/policy/matchExpressions/0","value":"mcp.tool.name == \\\"search_repositories\\\""}]'
+kubectl patch agentgatewaypolicy mslearn-tools-allowlist -n agentgateway-system --type='json' \
+  -p='[{"op":"replace","path":"/spec/backend/mcp/authorization/policy/matchExpressions/0","value":"mcp.tool.name == \\\"microsoft_docs_fetch\\\""}]'
 ```
 
 ---
@@ -398,16 +437,16 @@ kubectl patch agentgatewaypolicy github-tools-allowlist -n agentgateway-system -
 ## 7) Cleanup
 
 ```bash
-# Option A cleanup
+# Option A cleanup (local website-fetcher MCP)
 kubectl delete deployment mcp-website-fetcher
 kubectl delete service mcp-website-fetcher
 kubectl delete agentgatewaybackend mcp-backend
 kubectl delete httproute mcp
 
-# Option B cleanup
-kubectl delete agentgatewaybackend github-mcp-backend -n agentgateway-system
-kubectl delete httproute mcp-github -n agentgateway-system
-kubectl delete agentgatewaypolicy github-tools-allowlist -n agentgateway-system
+# Option B cleanup (Microsoft Learn MCP — what setup.sh creates)
+kubectl delete agentgatewaybackend mslearn-mcp-backend -n agentgateway-system
+kubectl delete httproute mcp-mslearn -n agentgateway-system
+kubectl delete agentgatewaypolicy mslearn-tools-allowlist -n agentgateway-system 2>/dev/null || true
 
 # proxy cleanup
 kubectl delete gateway agentgateway-proxy -n agentgateway-system

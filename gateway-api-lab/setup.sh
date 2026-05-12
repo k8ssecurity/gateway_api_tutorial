@@ -41,6 +41,10 @@ CILIUM_VERSION="1.19.3"
 METALLB_VERSION="v0.15.3"
 GATEWAY_API_VERSION="v1.5.0"
 ENVOY_GATEWAY_VERSION="v1.7.3"
+KGATEWAY_VERSION="v2.2.4"          # kgateway/agentgateway (AI gateway, separate from Envoy Gateway)
+
+# Set INSTALL_AGENTGATEWAY=false to skip the AI-gateway step
+INSTALL_AGENTGATEWAY="${INSTALL_AGENTGATEWAY:-true}"
 
 # Helper functions for formatted output
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -305,6 +309,124 @@ deploy_httproute() {
 }
 
 # =============================================================================
+# Step 9b (optional): Install Agentgateway (kgateway) + Microsoft Learn MCP
+#
+# Agentgateway is a SEPARATE gateway from Envoy Gateway, built specifically
+# for AI/agent traffic (MCP, A2A protocols). It uses its own GatewayClass
+# 'agentgateway' and its own control plane (kgateway). It can coexist with
+# Envoy Gateway in the same cluster.
+#
+# This step installs the kgateway control plane, creates an agentgateway
+# proxy Gateway, wires the public Microsoft Learn MCP server
+# (https://learn.microsoft.com/api/mcp) as an AgentgatewayBackend, and
+# exposes it on the proxy at the path /mcp-mslearn.
+#
+# Microsoft Learn MCP is a public, anonymous streamable-HTTP MCP server
+# that exposes Microsoft documentation tools (search, fetch, code samples).
+# No API key is required.
+# =============================================================================
+install_agentgateway() {
+    if [ "$INSTALL_AGENTGATEWAY" != "true" ]; then
+        info "Skipping agentgateway install (INSTALL_AGENTGATEWAY=$INSTALL_AGENTGATEWAY)"
+        return
+    fi
+
+    info "Installing kgateway/agentgateway $KGATEWAY_VERSION..."
+    info "This adds an AI gateway alongside Envoy Gateway for MCP traffic"
+
+    # 1. CRDs first, then controller
+    helm upgrade -i agentgateway-crds oci://ghcr.io/kgateway-dev/charts/agentgateway-crds \
+        --create-namespace --namespace agentgateway-system \
+        --version "$KGATEWAY_VERSION" \
+        --set controller.image.pullPolicy=Always
+
+    helm upgrade -i agentgateway oci://ghcr.io/kgateway-dev/charts/agentgateway \
+        --namespace agentgateway-system \
+        --version "$KGATEWAY_VERSION" \
+        --set controller.image.pullPolicy=Always
+
+    info "Waiting for agentgateway controller to be Available..."
+    # The controller deployment name varies slightly between releases — wait by label.
+    kubectl wait --timeout=5m -n agentgateway-system \
+        --for=condition=Available deployment \
+        -l app.kubernetes.io/name=agentgateway 2>/dev/null || \
+    kubectl wait --timeout=2m -n agentgateway-system \
+        --for=condition=Available deployment/agentgateway 2>/dev/null || \
+    sleep 5
+
+    # 2. Create the agentgateway proxy (Gateway resource)
+    info "Creating agentgateway proxy Gateway..."
+    kubectl apply -f - <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agentgateway-proxy
+  namespace: agentgateway-system
+spec:
+  gatewayClassName: agentgateway
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+EOF
+
+    info "Waiting for agentgateway-proxy Gateway to be Programmed..."
+    kubectl wait --timeout=5m -n agentgateway-system \
+        gateway/agentgateway-proxy --for=condition=Programmed
+
+    # 3. AgentgatewayBackend pointing at Microsoft Learn MCP
+    # Streamable HTTP upstream over HTTPS:443, SNI=learn.microsoft.com
+    info "Registering Microsoft Learn MCP as an AgentgatewayBackend..."
+    kubectl apply -f - <<EOF
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: mslearn-mcp-backend
+  namespace: agentgateway-system
+spec:
+  mcp:
+    targets:
+      - name: mslearn-target
+        static:
+          host: learn.microsoft.com
+          port: 443
+          path: /api/mcp
+          protocol: StreamableHTTP
+          policies:
+            tls:
+              sni: learn.microsoft.com
+EOF
+
+    # 4. HTTPRoute exposing the backend on the proxy at /mcp-mslearn
+    info "Exposing Microsoft Learn MCP at /mcp-mslearn..."
+    kubectl apply -f - <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mcp-mslearn
+  namespace: agentgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      namespace: agentgateway-system
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mcp-mslearn
+      backendRefs:
+        - name: mslearn-mcp-backend
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+EOF
+
+    success "Agentgateway installed with Microsoft Learn MCP backend at /mcp-mslearn"
+}
+
+# =============================================================================
 # Step 10: Configure /etc/hosts
 # Maps the Gateway IP to human-readable hostnames
 # This lets you use: curl http://webapp.local.dev/
@@ -421,6 +543,27 @@ EOF
     echo "  # Header-based routing (X-Canary: true → canary):"
     echo "  kubectl apply -f 08-httproute-header.yaml"
     echo ""
+
+    if [ "$INSTALL_AGENTGATEWAY" = "true" ]; then
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Agentgateway (Microsoft Learn MCP):"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "  # Both macOS and Linux: port-forward the agentgateway proxy"
+        echo "  kubectl -n agentgateway-system port-forward \\"
+        echo "    deployment/agentgateway-proxy 8080:80"
+        echo ""
+        echo "  # In another terminal, run the OpenAI Agents SDK test client"
+        echo "  # (requires OPENAI_API_KEY exported in your shell):"
+        echo "  pip install --upgrade openai-agents"
+        echo "  export OPENAI_API_KEY=sk-..."
+        echo "  python3 test-mslearn-agent.py"
+        echo ""
+        echo "  # Or poke the MCP endpoint with curl (lists nothing useful;"
+        echo "  # MCP needs a JSON-RPC client, this just confirms reachability):"
+        echo "  curl -i http://localhost:8080/mcp-mslearn"
+        echo ""
+    fi
 }
 
 # =============================================================================
@@ -445,6 +588,7 @@ main() {
     deploy_gateway
     deploy_app
     deploy_httproute
+    install_agentgateway
     configure_hosts
     print_status
 }
