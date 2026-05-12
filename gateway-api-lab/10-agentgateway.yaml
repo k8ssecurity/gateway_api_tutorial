@@ -1,0 +1,77 @@
+# =============================================================================
+# Agentgateway Proxy - Gateway resource for AI/agent traffic
+# =============================================================================
+#
+# NETWORK ANALOGY: A second virtual load balancer dedicated to AI/agent
+# protocols (MCP, A2A). It runs SIDE BY SIDE with the Envoy Gateway from
+# 03-gateway.yaml — different GatewayClass, different controller, different
+# data plane.
+#
+# CONTROL PLANE: agentgateway (decoupled from kgateway since v1.0).
+#                Installed by setup.sh via Helm:
+#                  oci://cr.agentgateway.dev/charts/agentgateway
+#
+# GATEWAYCLASS: 'agentgateway' — auto-created by the Helm chart with
+#               controllerName: agentgateway.dev/agentgateway
+#
+# WHEN TO USE: For MCP servers, agent-to-agent protocols, or other
+#              LLM tool traffic. For traditional HTTP/HTTPS web apps,
+#              keep using the Envoy Gateway from 03-gateway.yaml.
+#
+# PREREQUISITES: setup.sh runs the Helm install before applying this file.
+# To install manually:
+#
+#   helm upgrade -i agentgateway-crds \
+#     oci://cr.agentgateway.dev/charts/agentgateway-crds \
+#     --create-namespace --namespace agentgateway-system \
+#     --version v1.1.0
+#
+#   helm upgrade -i agentgateway \
+#     oci://cr.agentgateway.dev/charts/agentgateway \
+#     --namespace agentgateway-system \
+#     --version v1.1.0
+#
+# =============================================================================
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agentgateway-proxy
+  namespace: agentgateway-system   # Must live in the agentgateway namespace
+spec:
+  gatewayClassName: agentgateway   # Different from Envoy Gateway's 'eg'
+  listeners:
+    # Single HTTP listener on port 80. TLS termination can be added later
+    # via FrontendTLS (see https://agentgateway.dev/docs/kubernetes/main/setup/listeners/https/).
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All                # Accept HTTPRoutes/MCP routes from any namespace
+
+# =============================================================================
+# HOW TO TEST:
+# =============================================================================
+#
+# 1. Apply this file:
+#    kubectl apply -f 10-agentgateway.yaml
+#
+# 2. Wait for the Gateway to be Programmed:
+#    kubectl wait --timeout=5m -n agentgateway-system \
+#      gateway/agentgateway-proxy --for=condition=Programmed
+#
+# 3. Get the MetalLB IP:
+#    kubectl get svc -n agentgateway-system agentgateway-proxy
+#
+# Note: On macOS, the MetalLB IP is not directly reachable from your host —
+# use `kubectl port-forward deployment/agentgateway-proxy -n agentgateway-system 8080:80`
+# to test from your terminal. On Linux you can curl the IP directly.
+#
+# =============================================================================
+# CLEANUP:
+# =============================================================================
+#
+# kubectl delete -f 10-agentgateway.yaml
+#
+# =============================================================================

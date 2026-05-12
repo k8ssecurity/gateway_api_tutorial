@@ -1,0 +1,129 @@
+# =============================================================================
+# Microsoft Learn MCP - AgentgatewayBackend + HTTPRoute
+# =============================================================================
+#
+# WHAT THIS DOES:
+# Exposes the public Microsoft Learn MCP server
+# (https://learn.microsoft.com/api/mcp) through the agentgateway-proxy from
+# 10-agentgateway.yaml at the path /mcp-mslearn.
+#
+#   Client  ──HTTP──>  agentgateway-proxy  ──HTTPS(SNI)──>  learn.microsoft.com:443/api/mcp
+#
+# Microsoft Learn MCP is a public, anonymous, streamable-HTTP MCP server
+# that exposes Microsoft documentation tools (search, fetch, code samples).
+# No API key, no PAT, no OAuth — it just works.
+#
+# Reference: https://learn.microsoft.com/en-us/training/support/mcp
+#
+# PREREQUISITES:
+# - 10-agentgateway.yaml has been applied and the Gateway is Programmed.
+# - The cluster has outbound egress to learn.microsoft.com:443.
+#
+# =============================================================================
+
+---
+# AgentgatewayBackend - describes the upstream MCP server to agentgateway.
+#
+# - protocol: StreamableHTTP — matches Microsoft Learn's transport. The other
+#   valid value is SSE (used for legacy SSE-only MCP servers).
+# - path: /api/mcp — the path on the upstream where the MCP endpoint lives.
+# - tls.sni: learn.microsoft.com — Microsoft's load balancer routes by SNI,
+#   so this is required even though the cert CN happens to match the host.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: mslearn-mcp-backend
+  namespace: agentgateway-system
+spec:
+  mcp:
+    targets:
+      - name: mslearn-target
+        static:
+          host: learn.microsoft.com
+          port: 443
+          path: /api/mcp
+          protocol: StreamableHTTP
+          policies:
+            tls:
+              sni: learn.microsoft.com
+
+---
+# HTTPRoute - attaches the backend to the proxy at the path /mcp-mslearn.
+# Clients reach Microsoft Learn MCP via:
+#   http://<agentgateway-proxy>/mcp-mslearn
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mcp-mslearn
+  namespace: agentgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      namespace: agentgateway-system
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mcp-mslearn
+      backendRefs:
+        - name: mslearn-mcp-backend
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+
+# =============================================================================
+# HOW TO TEST:
+# =============================================================================
+#
+# 1. Apply this file (after 10-agentgateway.yaml):
+#    kubectl apply -f 11-mcp-mslearn.yaml
+#
+# 2. Verify the route is attached:
+#    kubectl describe httproute mcp-mslearn -n agentgateway-system
+#    # Look for Accepted=True and ResolvedRefs=True on the parent.
+#
+# 3. Port-forward (works on both macOS and Linux):
+#    kubectl -n agentgateway-system port-forward \
+#      deployment/agentgateway-proxy 8080:80
+#
+# 4. In another terminal, run the OpenAI Agents SDK test client:
+#    pip install --upgrade openai-agents
+#    export OPENAI_API_KEY=sk-...
+#    python3 test-mslearn-agent.py
+#
+# The script lists the tools exposed by Microsoft Learn MCP on stderr
+# (typically microsoft_docs_search, microsoft_docs_fetch, ...) and then
+# prints a cited answer about Azure App Service.
+#
+# =============================================================================
+# OPTIONAL: tool allowlist (AgentgatewayPolicy)
+# =============================================================================
+#
+# To restrict the backend to a single tool, apply this policy. Re-running
+# the test client afterwards will show only `microsoft_docs_search` in the
+# tool list.
+#
+# apiVersion: agentgateway.dev/v1alpha1
+# kind: AgentgatewayPolicy
+# metadata:
+#   name: mslearn-tools-allowlist
+#   namespace: agentgateway-system
+# spec:
+#   targetRefs:
+#     - group: agentgateway.dev
+#       kind: AgentgatewayBackend
+#       name: mslearn-mcp-backend
+#   backend:
+#     mcp:
+#       authorization:
+#         action: Allow
+#         policy:
+#           matchExpressions:
+#             - 'mcp.tool.name == "microsoft_docs_search"'
+#
+# =============================================================================
+# CLEANUP:
+# =============================================================================
+#
+# kubectl delete -f 11-mcp-mslearn.yaml
+#
+# =============================================================================

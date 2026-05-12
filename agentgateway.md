@@ -108,23 +108,10 @@ This creates:
 - a `Gateway` named `agentgateway-proxy`
 - a backing `Deployment` and `Service` of the same name in `agentgateway-system`
 
+The manifest lives in `gateway-api-lab/10-agentgateway.yaml`:
+
 ```bash
-kubectl apply -f- <<'EOF'
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: agentgateway-proxy
-  namespace: agentgateway-system
-spec:
-  gatewayClassName: agentgateway
-  listeners:
-    - name: http
-      protocol: HTTP
-      port: 80
-      allowedRoutes:
-        namespaces:
-          from: All
-EOF
+kubectl apply -f 10-agentgateway.yaml
 
 kubectl wait --timeout=5m -n agentgateway-system \
   gateway/agentgateway-proxy --for=condition=Programmed
@@ -251,63 +238,24 @@ Connect:
 
 [Microsoft Learn MCP](https://learn.microsoft.com/en-us/training/support/mcp) is a public, anonymous streamable-HTTP MCP server hosted at `https://learn.microsoft.com/api/mcp`. It exposes tools for searching Microsoft documentation and fetching articles and code samples. No API key, no PAT — it just works.
 
-This is what `setup.sh` configures automatically. The two manifests below are the same ones the script applies.
-
-### 4.1 Create an AgentgatewayBackend for Microsoft Learn MCP
+This is what `setup.sh` configures automatically. Both resources live together in `gateway-api-lab/11-mcp-mslearn.yaml`:
 
 ```bash
-kubectl apply -f- <<'EOF'
-apiVersion: agentgateway.dev/v1alpha1
-kind: AgentgatewayBackend
-metadata:
-  name: mslearn-mcp-backend
-  namespace: agentgateway-system
-spec:
-  mcp:
-    targets:
-      - name: mslearn-target
-        static:
-          host: learn.microsoft.com
-          port: 443
-          path: /api/mcp
-          protocol: StreamableHTTP
-          policies:
-            tls:
-              sni: learn.microsoft.com
-EOF
+kubectl apply -f 11-mcp-mslearn.yaml
 ```
 
-Notes on the fields:
-- `protocol: StreamableHTTP` — Microsoft Learn MCP uses the MCP streamable-HTTP transport (one HTTP endpoint that can upgrade to SSE for streaming responses). The other valid value is `SSE` for SSE-only upstreams.
-- `path: /api/mcp` — the path on the upstream where the MCP endpoint lives.
-- `policies.tls.sni` — required because Microsoft's load balancer relies on SNI to route to the right backend.
+That single manifest contains:
 
-### 4.2 Create an HTTPRoute at `/mcp-mslearn`
+1. **AgentgatewayBackend `mslearn-mcp-backend`** — declares Microsoft Learn MCP as an upstream:
+   - `protocol: StreamableHTTP` — matches Microsoft Learn's transport (one HTTP endpoint that can upgrade to SSE for streaming responses). The other valid value is `SSE` for SSE-only upstreams.
+   - `path: /api/mcp` — the path on the upstream where the MCP endpoint lives.
+   - `policies.tls.sni: learn.microsoft.com` — required because Microsoft's load balancer relies on SNI to route to the right backend.
 
-```bash
-kubectl apply -f- <<'EOF'
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: mcp-mslearn
-  namespace: agentgateway-system
-spec:
-  parentRefs:
-    - name: agentgateway-proxy
-      namespace: agentgateway-system
-  rules:
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /mcp-mslearn
-      backendRefs:
-        - name: mslearn-mcp-backend
-          group: agentgateway.dev
-          kind: AgentgatewayBackend
-EOF
-```
+2. **HTTPRoute `mcp-mslearn`** — attaches the backend to the proxy at `/mcp-mslearn`.
 
 Clients now reach Microsoft Learn MCP at `http://<agentgateway-proxy>/mcp-mslearn`.
+
+The file also contains a commented-out `AgentgatewayPolicy` snippet you can uncomment to restrict the backend to a single tool (see Section 6 for context).
 
 ---
 

@@ -363,74 +363,17 @@ install_agentgateway() {
     # controllerName agentgateway.dev/agentgateway. Wait until it's accepted.
     kubectl wait --timeout=60s gatewayclass/agentgateway --for=condition=Accepted 2>/dev/null || true
 
-    # 2. Create the agentgateway proxy (Gateway resource)
-    info "Creating agentgateway proxy Gateway..."
-    kubectl apply -f - <<EOF
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: agentgateway-proxy
-  namespace: agentgateway-system
-spec:
-  gatewayClassName: agentgateway
-  listeners:
-    - name: http
-      protocol: HTTP
-      port: 80
-      allowedRoutes:
-        namespaces:
-          from: All
-EOF
+    # 3. Create the agentgateway proxy (Gateway resource)
+    info "Creating agentgateway proxy Gateway (10-agentgateway.yaml)..."
+    kubectl apply -f 10-agentgateway.yaml
 
     info "Waiting for agentgateway-proxy Gateway to be Programmed..."
     kubectl wait --timeout=5m -n agentgateway-system \
         gateway/agentgateway-proxy --for=condition=Programmed
 
-    # 3. AgentgatewayBackend pointing at Microsoft Learn MCP
-    # Streamable HTTP upstream over HTTPS:443, SNI=learn.microsoft.com
-    info "Registering Microsoft Learn MCP as an AgentgatewayBackend..."
-    kubectl apply -f - <<EOF
-apiVersion: agentgateway.dev/v1alpha1
-kind: AgentgatewayBackend
-metadata:
-  name: mslearn-mcp-backend
-  namespace: agentgateway-system
-spec:
-  mcp:
-    targets:
-      - name: mslearn-target
-        static:
-          host: learn.microsoft.com
-          port: 443
-          path: /api/mcp
-          protocol: StreamableHTTP
-          policies:
-            tls:
-              sni: learn.microsoft.com
-EOF
-
-    # 4. HTTPRoute exposing the backend on the proxy at /mcp-mslearn
-    info "Exposing Microsoft Learn MCP at /mcp-mslearn..."
-    kubectl apply -f - <<EOF
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: mcp-mslearn
-  namespace: agentgateway-system
-spec:
-  parentRefs:
-    - name: agentgateway-proxy
-      namespace: agentgateway-system
-  rules:
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /mcp-mslearn
-      backendRefs:
-        - name: mslearn-mcp-backend
-          group: agentgateway.dev
-          kind: AgentgatewayBackend
-EOF
+    # 4. AgentgatewayBackend + HTTPRoute for Microsoft Learn MCP
+    info "Wiring Microsoft Learn MCP at /mcp-mslearn (11-mcp-mslearn.yaml)..."
+    kubectl apply -f 11-mcp-mslearn.yaml
 
     success "Agentgateway installed with Microsoft Learn MCP backend at /mcp-mslearn"
 }
