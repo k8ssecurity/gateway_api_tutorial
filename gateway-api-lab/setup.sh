@@ -6,7 +6,7 @@
 # WHAT THIS SCRIPT DOES:
 # 1. Creates a 3-node Kubernetes cluster using KIND (Docker containers)
 # 2. Installs Cilium as the network fabric (CNI)
-# 3. Installs MetalLB to provide external IPs (like a cloud provider would)
+# 3. Provides external IPs via the chosen LB_PROVIDER (metallb | cilium)
 # 4. Installs Gateway API CRDs (the standard definitions)
 # 5. Installs Envoy Gateway (the actual load balancer implementation)
 # 6. Creates a TLS certificate and Gateway resource
@@ -34,16 +34,18 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Version Configuration
-# These are pinned to known-working versions for reproducibility
-# Last updated: May 2026
+# All pinned versions live in versions.env (single source of truth, shared
+# across labs). Source it relative to this script's location.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=versions.env
+source "$SCRIPT_DIR/versions.env"
+
 CLUSTER_NAME="gateway-api-lab"
-CILIUM_VERSION="1.19.3"
-METALLB_VERSION="v0.15.3"
-GATEWAY_API_VERSION="v1.5.0"
-ENVOY_GATEWAY_VERSION="v1.7.3"
-AGENTGATEWAY_VERSION="v1.1.0"      # agentgateway (AI gateway, separate from Envoy Gateway).
-                                   # As of agentgateway v1.0 the charts live at
-                                   # cr.agentgateway.dev/charts/, decoupled from kgateway.
+
+# LoadBalancer provider for the Gateway's external IP: metallb | cilium
+#   metallb -> installs MetalLB (separate controller)            [default]
+#   cilium  -> uses Cilium's built-in LB-IPAM + L2 announcements (no extra pods)
+LB_PROVIDER="${LB_PROVIDER:-metallb}"
 
 # Set INSTALL_AGENTGATEWAY=false to skip the AI-gateway step
 INSTALL_AGENTGATEWAY="${INSTALL_AGENTGATEWAY:-true}"
@@ -88,9 +90,10 @@ create_cluster() {
         kind delete cluster --name $CLUSTER_NAME
     fi
 
-    # Create cluster from config file
-    kind create cluster --config=01-kind-config.yaml
-    success "KIND cluster created!"
+    # Create cluster from config file. --image makes versions.env authoritative
+    # for the Kubernetes version (overrides the inline image in the config).
+    kind create cluster --config=01-kind-config.yaml --image "$K8S_NODE_IMAGE"
+    success "KIND cluster created (Kubernetes $K8S_NODE_IMAGE)!"
 }
 
 # =============================================================================
@@ -102,11 +105,25 @@ install_cilium() {
     info "Installing Cilium CNI v$CILIUM_VERSION..."
     info "Cilium will handle all networking between pods (containers)"
 
+    # When using Cilium as the LoadBalancer, enable L2 announcements + a higher
+    # k8s client rate limit (L2 leases poll the API). Not needed for MetalLB.
+    local lb_flags=()
+    if [ "$LB_PROVIDER" = "cilium" ]; then
+        info "LB_PROVIDER=cilium -> enabling L2 announcements + LB-IPAM"
+        lb_flags=(
+            --set l2announcements.enabled=true
+            --set externalIPs.enabled=true
+            --set k8sClientRateLimit.qps=50
+            --set k8sClientRateLimit.burst=100
+        )
+    fi
+
     cilium install \
         --version $CILIUM_VERSION \
         --set kubeProxyReplacement=true \
         --set k8sServiceHost=${CLUSTER_NAME}-control-plane \
-        --set k8sServicePort=6443
+        --set k8sServicePort=6443 \
+        "${lb_flags[@]}"
 
     info "Waiting for Cilium to be ready (this may take 1-2 minutes)..."
     cilium status --wait
@@ -178,6 +195,63 @@ EOF
     rm /tmp/metallb-config.yaml
 
     success "MetalLB installed and configured!"
+}
+
+# =============================================================================
+# Step 4 (alternative): Configure Cilium LoadBalancer (LB-IPAM + L2)
+# Used when LB_PROVIDER=cilium. No extra controller — Cilium (already the CNI,
+# installed with L2 flags above) just needs a CiliumLoadBalancerIPPool and a
+# CiliumL2AnnouncementPolicy. API versions (Cilium 1.19): IPPool cilium.io/v2,
+# L2 policy cilium.io/v2alpha1.
+# =============================================================================
+install_cilium_lb() {
+    info "Configuring Cilium LB-IPAM + L2 announcements..."
+
+    KIND_NET_CIDR=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}' \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$' \
+        | head -1)
+    [ -z "$KIND_NET_CIDR" ] && error "Could not determine IPv4 subnet of the Docker 'kind' network."
+    KIND_NET_PREFIX=$(echo "$KIND_NET_CIDR" | cut -d. -f1-2)
+
+    info "Detected KIND network (IPv4): $KIND_NET_CIDR"
+    info "Using IP range: ${KIND_NET_PREFIX}.255.200-${KIND_NET_PREFIX}.255.250"
+
+    cat > /tmp/cilium-lb.yaml <<EOF
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: kind-pool
+spec:
+  blocks:
+    - start: "${KIND_NET_PREFIX}.255.200"
+      stop: "${KIND_NET_PREFIX}.255.250"
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: kind-l2
+spec:
+  interfaces:
+    - ^eth[0-9]+
+  externalIPs: true
+  loadBalancerIPs: true
+EOF
+
+    kubectl apply -f /tmp/cilium-lb.yaml
+    rm /tmp/cilium-lb.yaml
+
+    success "Cilium LB-IPAM + L2 announcements configured!"
+}
+
+# =============================================================================
+# Step 4 dispatcher: install the chosen LoadBalancer
+# =============================================================================
+install_loadbalancer() {
+    case "$LB_PROVIDER" in
+        metallb) install_metallb ;;
+        cilium)  install_cilium_lb ;;
+        *) error "Unknown LB_PROVIDER='$LB_PROVIDER' (use 'metallb' or 'cilium')." ;;
+    esac
 }
 
 # =============================================================================
@@ -533,7 +607,7 @@ main() {
     check_prerequisites
     create_cluster
     install_cilium
-    install_metallb
+    install_loadbalancer
     install_gateway_api_crds
     install_envoy_gateway
     deploy_gateway

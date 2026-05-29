@@ -12,7 +12,7 @@ A complete hands-on guide to deploying the Kubernetes Gateway API with Envoy Gat
 - [Quick Start (Automated)](#quick-start-automated)
 - [Part 1: Environment Setup](#part-1-environment-setup)
 - [Part 2: Create KIND Cluster with Cilium](#part-2-create-kind-cluster-with-cilium)
-- [Part 3: Install MetalLB for LoadBalancer Support](#part-3-install-metallb-for-loadbalancer-support)
+- [Part 3: LoadBalancer Support (choose MetalLB or Cilium)](#part-3-loadbalancer-support-choose-metallb-or-cilium)
 - [Part 4: Install Envoy Gateway](#part-4-install-envoy-gateway)
 - [Part 5: Deploy Gateway and Sample Application](#part-5-deploy-gateway-and-sample-application)
 - [Part 6: Testing HTTP and HTTPS](#part-6-testing-http-and-https)
@@ -328,9 +328,16 @@ kubectl -n kube-system get pods -l k8s-app=cilium
 
 ---
 
-## Part 3: Install MetalLB for LoadBalancer Support
+## Part 3: LoadBalancer Support (choose MetalLB or Cilium)
 
-In cloud environments (AWS, GCP, Azure), when you create a LoadBalancer service, the cloud provider assigns an external IP. KIND runs locally and has no cloud provider, so we use MetalLB to assign IPs from a local pool. Think of it as running your own "mini cloud load balancer".
+In cloud environments (AWS, GCP, Azure), a LoadBalancer service gets an external IP from the cloud provider. KIND has none, so we provide IPs locally. There are **two options** — `setup.sh` picks between them with the `LB_PROVIDER` environment variable (`metallb` is the default):
+
+- **Option A — MetalLB** (`LB_PROVIDER=metallb`): a separate controller, CNI-agnostic, the "classic" on-prem pattern. Steps 3.1–3.3 below.
+- **Option B — Cilium LB-IPAM + L2** (`LB_PROVIDER=cilium`): no extra controller since Cilium is already the CNI. See "Option B" at the end of this part.
+
+Both yield the same Gateway IP range and identical testing later. Do **one**, not both — two ARP announcers on the same pool conflict.
+
+### Option A — MetalLB
 
 ### Step 3.1: Install MetalLB
 
@@ -399,6 +406,54 @@ kubectl apply -f metallb-config.yaml
 # Verify the IP pool is created
 kubectl get ipaddresspools -n metallb-system
 ```
+
+### Option B — Cilium LB-IPAM + L2 announcements
+
+If you'd rather not run MetalLB, Cilium can be the LoadBalancer itself — no extra controller. This is what `LB_PROVIDER=cilium ./setup.sh` does.
+
+**1. Cilium must be installed with L2 announcements on.** Re-run the Part 2 install with these extra flags (the `setup.sh` script adds them automatically when `LB_PROVIDER=cilium`):
+
+```bash
+cilium install --version 1.19.3 \
+  --set kubeProxyReplacement=true \
+  --set k8sServiceHost=gateway-api-lab-control-plane --set k8sServicePort=6443 \
+  --set l2announcements.enabled=true \
+  --set externalIPs.enabled=true \
+  --set k8sClientRateLimit.qps=50 --set k8sClientRateLimit.burst=100
+```
+
+The `k8sClientRateLimit` bump matters: L2 announcements use leases that poll the API server, and the default QPS throttles.
+
+**2. Create the pool + L2 policy** (Cilium 1.19 API versions: `IPPool` is `cilium.io/v2`, the L2 policy is `cilium.io/v2alpha1`). Adjust the `172.18` prefix to your `docker network inspect kind` output:
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: kind-pool
+spec:
+  blocks:
+    - start: "172.18.255.200"
+      stop: "172.18.255.250"
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: kind-l2
+spec:
+  interfaces:
+    - ^eth[0-9]+
+  externalIPs: true
+  loadBalancerIPs: true
+```
+
+```bash
+kubectl apply -f cilium-lb.yaml     # this repo ships gateway-api-lab/02-cilium-lb.yaml
+kubectl get ciliumloadbalancerippool
+kubectl get ciliuml2announcementpolicy
+```
+
+From here, Parts 4–8 are identical regardless of which LoadBalancer you chose.
 
 ---
 
@@ -1242,18 +1297,22 @@ cilium install --version 1.19.3 --set kubeProxyReplacement=true
 
 ### Gateway Has No External IP
 
-MetalLB might not be configured correctly.
+Your LoadBalancer might not be configured correctly. Check the one you used.
 
 ```bash
-# Check MetalLB pods
+# LB_PROVIDER=metallb
 kubectl get pods -n metallb-system
-
-# Check IP address pool
 kubectl get ipaddresspools -n metallb-system
-
-# Check MetalLB speaker logs
 kubectl logs -n metallb-system -l component=speaker --tail=50
+
+# LB_PROVIDER=cilium
+kubectl get ciliumloadbalancerippool
+kubectl get ciliuml2announcementpolicy
+cilium config view | grep -iE 'l2-announce|enable-lb-ipam'
+kubectl get lease -n kube-system | grep -i l2announce
 ```
+
+Either way, the pool's IP range must overlap the IPv4 subnet from `docker network inspect kind`.
 
 ### HTTPS Not Working (Only Port 80 Exposed)
 

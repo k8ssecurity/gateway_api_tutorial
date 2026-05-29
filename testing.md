@@ -262,16 +262,23 @@ See [Part 7.4 of the main tutorial](kubernetes-gateway-api-tutorial.md#74-tls-pa
 
 ### Gateway has `PROGRAMMED=False` or no `ADDRESS`
 
-MetalLB hasn't assigned an IP. Check the pool:
+Your LoadBalancer hasn't assigned an IP. Check the pool for whichever `LB_PROVIDER` you used:
 
 ```bash
+# LB_PROVIDER=metallb (default)
 kubectl get ipaddresspools -n metallb-system -o yaml
+
+# LB_PROVIDER=cilium
+kubectl get ciliumloadbalancerippool -o yaml
+kubectl get ciliuml2announcementpolicy
+
+# either way, compare against the actual kind subnet:
 docker network inspect kind \
   -f '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}' \
   | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$'
 ```
 
-The pool's IP range must overlap the IPv4 subnet shown by `docker network inspect`. If the Docker network is on `172.20.x.x` but the pool is on `172.18.x.x`, MetalLB has nothing to advertise. Re-run `setup.sh` — it auto-detects the IPv4 subnet correctly.
+The pool's IP range must overlap the IPv4 subnet shown by `docker network inspect`. If the Docker network is on `172.20.x.x` but the pool is on `172.18.x.x`, the LoadBalancer has nothing to advertise. Re-run `setup.sh` — it auto-detects the IPv4 subnet correctly.
 
 ### `kubectl port-forward` says "address already in use"
 

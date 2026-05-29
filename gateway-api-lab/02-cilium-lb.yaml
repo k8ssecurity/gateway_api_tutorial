@@ -1,0 +1,66 @@
+# =============================================================================
+# Cilium LoadBalancer Configuration - LB-IPAM + L2 Announcements
+# =============================================================================
+#
+# This is the Cilium-native replacement for MetalLB. Because Cilium is already
+# the CNI, no extra controller is needed: Cilium's operator assigns IPs from the
+# pool below (LB-IPAM) and the agents ARP-advertise them (L2 announcements).
+#
+# NETWORK ANALOGY: same idea as a DHCP pool for your LoadBalancer VIPs.
+#   CiliumLoadBalancerIPPool   == MetalLB IPAddressPool
+#   CiliumL2AnnouncementPolicy == MetalLB L2Advertisement
+#
+# PREREQUISITE: Cilium must be installed with L2 announcements enabled, e.g.
+#   cilium install ... \
+#     --set l2announcements.enabled=true \
+#     --set externalIPs.enabled=true \
+#     --set k8sClientRateLimit.qps=50 --set k8sClientRateLimit.burst=100
+#
+# NOTE: setup.sh auto-generates this with the detected Docker network range.
+# If running manually, check your network: docker network inspect kind
+#
+# API versions (Cilium 1.19):
+#   CiliumLoadBalancerIPPool   -> cilium.io/v2      (v2alpha1 is deprecated)
+#   CiliumL2AnnouncementPolicy -> cilium.io/v2alpha1
+# =============================================================================
+
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: kind-pool
+spec:
+  blocks:
+    # IP range to assign to LoadBalancer services.
+    # Must be on the same L2 network as the KIND nodes.
+    # setup.sh calculates this automatically from the 'kind' Docker network.
+    - start: "172.18.255.200"
+      stop: "172.18.255.250"
+
+---
+# L2 announcement policy: advertise the LoadBalancer IPs via ARP on the node
+# interfaces (eth0, eth1, ...). Simpler than BGP and works in local/KIND setups.
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: kind-l2
+spec:
+  interfaces:
+    - ^eth[0-9]+
+  externalIPs: true
+  loadBalancerIPs: true
+
+# =============================================================================
+# TROUBLESHOOTING:
+#
+# 1. Find your Docker network range:
+#    docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+#
+# 2. If Gateway stays "Pending" for an IP:
+#    - Check the pool:   kubectl get ciliumloadbalancerippool
+#    - Check the policy: kubectl get ciliuml2announcementpolicy
+#    - Confirm L2 is on: cilium config view | grep -i l2announce
+#    - Check leases:     kubectl get lease -n kube-system | grep l2announce
+#
+# 3. Do NOT run MetalLB at the same time — two ARP announcers on the same pool
+#    will conflict. This branch uses Cilium only.
+# =============================================================================
