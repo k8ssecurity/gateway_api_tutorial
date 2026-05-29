@@ -119,14 +119,30 @@ What `setup.sh` does, in order:
 8. Writes a `webapp.local.dev` / `api.local.dev` entry to `/etc/hosts` (requires `sudo`). On macOS this points at `127.0.0.1` because MetalLB IPs are not routable from the host; on Linux it points directly at the Gateway IP.
 9. Prints platform-appropriate test commands (see [Part 6](#part-6-testing-http-and-https)).
 
-Pinned versions (kept current — last refreshed May 2026):
+### Versions — one source of truth (`versions.env`)
+
+All pinned versions live in [`versions.env`](gateway-api-lab/versions.env). Both
+`setup.sh` **and the manual steps below** read from it, so there's no drift —
+bump a version once in that file and everything follows.
+
+**If you are doing the manual walkthrough, source it first** (the commands in
+later parts use these variables like `$CILIUM_VERSION`):
 
 ```bash
-KUBERNETES_NODE_IMAGE="kindest/node:v1.33.7"   # kind v0.31.0; pinned to stay on par with other labs
+cd gateway-api-lab
+source versions.env
+echo "$K8S_NODE_IMAGE / cilium $CILIUM_VERSION / envoy $ENVOY_GATEWAY_VERSION"
+```
+
+Current values (last refreshed May 2026):
+
+```bash
+K8S_NODE_IMAGE="kindest/node:v1.33.7"   # kind v0.31.0; on par with other labs
 CILIUM_VERSION="1.19.3"
-METALLB_VERSION="v0.15.3"
+METALLB_VERSION="v0.15.3"                # only if LB_PROVIDER/Option A (MetalLB)
 GATEWAY_API_VERSION="v1.5.0"
 ENVOY_GATEWAY_VERSION="v1.7.3"
+AGENTGATEWAY_VERSION="v1.1.0"
 ```
 
 If anything fails partway through, re-running `./setup.sh` is safe — it deletes the existing cluster and starts fresh.
@@ -273,8 +289,9 @@ networking:
 This command creates 3 Docker containers that act as Kubernetes nodes. It takes about 1-2 minutes.
 
 ```bash
-# Create the cluster using our config file
-kind create cluster --config=kind-config.yaml
+# Create the cluster using our config file.
+# --image makes versions.env authoritative for the Kubernetes version.
+kind create cluster --config=kind-config.yaml --image "$K8S_NODE_IMAGE"
 
 # Check the nodes - they'll be "NotReady" until we install Cilium
 kubectl get nodes
@@ -283,9 +300,9 @@ kubectl get nodes
 Expected output (nodes are NotReady because no CNI is installed yet):
 ```
 NAME                             STATUS     ROLES           AGE   VERSION
-gateway-api-lab-control-plane    NotReady   control-plane   30s   v1.31.0
-gateway-api-lab-worker           NotReady   <none>          10s   v1.31.0
-gateway-api-lab-worker2          NotReady   <none>          10s   v1.31.0
+gateway-api-lab-control-plane    NotReady   control-plane   30s   v1.33.7
+gateway-api-lab-worker           NotReady   <none>          10s   v1.33.7
+gateway-api-lab-worker2          NotReady   <none>          10s   v1.33.7
 ```
 
 ### Step 2.3: Install Cilium CNI
@@ -296,10 +313,12 @@ Cilium provides the network connectivity between pods. Without a CNI, pods can't
 # Install Cilium with kube-proxy replacement
 # This takes 2-3 minutes as it downloads and starts the Cilium agents
 cilium install \
-  --version 1.19.3 \
+  --version "$CILIUM_VERSION" \
   --set kubeProxyReplacement=true \
   --set k8sServiceHost=gateway-api-lab-control-plane \
   --set k8sServicePort=6443
+# NOTE: if you plan to use Cilium as the LoadBalancer (Part 3 Option B), add the
+# L2-announcement flags shown there to THIS install command.
 
 # Wait for Cilium to be fully ready
 cilium status --wait
@@ -343,7 +362,7 @@ Both yield the same Gateway IP range and identical testing later. Do **one**, no
 
 ```bash
 # Install MetalLB components
-kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.15.3/config/manifests/metallb-native.yaml
+kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/${METALLB_VERSION}/config/manifests/metallb-native.yaml
 
 # Wait for MetalLB pods to be ready (about 30 seconds)
 kubectl wait --namespace metallb-system \
@@ -414,7 +433,7 @@ If you'd rather not run MetalLB, Cilium can be the LoadBalancer itself — no ex
 **1. Cilium must be installed with L2 announcements on.** Re-run the Part 2 install with these extra flags (the `setup.sh` script adds them automatically when `LB_PROVIDER=cilium`):
 
 ```bash
-cilium install --version 1.19.3 \
+cilium install --version "$CILIUM_VERSION" \
   --set kubeProxyReplacement=true \
   --set k8sServiceHost=gateway-api-lab-control-plane --set k8sServicePort=6443 \
   --set l2announcements.enabled=true \
@@ -472,7 +491,7 @@ We use the **Experimental** channel to get the full set of route types up front.
 ```bash
 # Install the EXPERIMENTAL Gateway API CRDs (includes TCPRoute/UDPRoute)
 # Use --server-side to handle large CRD manifests
-kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.0/experimental-install.yaml
+kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/experimental-install.yaml
 
 # Verify CRDs are installed
 kubectl get crds | grep gateway
@@ -498,7 +517,7 @@ Now we install the Envoy Gateway controller. This watches for Gateway resources 
 # Install Envoy Gateway
 # --skip-crds because we already installed Gateway API CRDs above
 helm install eg oci://docker.io/envoyproxy/gateway-helm \
-  --version v1.7.3 \
+  --version "$ENVOY_GATEWAY_VERSION" \
   -n envoy-gateway-system \
   --create-namespace \
   --skip-crds
@@ -1292,7 +1311,7 @@ kubectl logs -n kube-system -l k8s-app=cilium --tail=50
 
 # Reinstall Cilium if needed
 cilium uninstall
-cilium install --version 1.19.3 --set kubeProxyReplacement=true
+cilium install --version "$CILIUM_VERSION" --set kubeProxyReplacement=true
 ```
 
 ### Gateway Has No External IP

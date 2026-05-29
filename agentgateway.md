@@ -1,4 +1,4 @@
-# Agentgateway Setup on KIND (with MetalLB)
+# Agentgateway Setup on KIND
 
 This doc installs the agentgateway control plane, creates an agentgateway proxy (Gateway API `Gateway`), and wires up an MCP server through the gateway.
 
@@ -40,7 +40,7 @@ You can run **both** in the same cluster - they use different GatewayClasses and
 This guide assumes you already have:
 - A working KIND cluster (from the Gateway API tutorial — `./setup.sh` in `gateway-api-lab/`)
 - Gateway API CRDs installed (the tutorial installs the Experimental channel of v1.5.0)
-- MetalLB installed and configured (so `LoadBalancer` Services get an IP)
+- A LoadBalancer configured so `LoadBalancer` Services get an IP — either MetalLB or Cilium LB-IPAM (see Part 3 of the tutorial / `LB_PROVIDER`). Agentgateway works the same with either.
 - `kubectl` and `helm` installed
 
 ---
@@ -61,10 +61,11 @@ The sections below walk through what `setup.sh` does and how to do it by hand.
 
 ## 1) Install agentgateway (control plane)
 
-As of agentgateway v1.0 the project was decoupled from kgateway and the Helm charts moved to `cr.agentgateway.dev/charts/`. The current stable line is **v1.1.x**.
+As of agentgateway v1.0 the project was decoupled from kgateway and the Helm charts moved to `cr.agentgateway.dev/charts/`. The version is pinned in the lab's `versions.env` (single source of truth) — source it so this matches the rest of the lab:
 
 ```bash
-export AGW_VERSION=v1.1.0
+source gateway-api-lab/versions.env          # defines AGENTGATEWAY_VERSION
+export AGW_VERSION="${AGENTGATEWAY_VERSION:-v1.1.0}"
 ```
 
 Install the CRDs (this also creates the `agentgateway-system` namespace):
@@ -127,10 +128,10 @@ kubectl get gateway,deployment,svc -n agentgateway-system
 
 | Platform | Method | Command |
 |---|---|---|
-| Linux | MetalLB EXTERNAL-IP (direct) | `kubectl get svc -n agentgateway-system agentgateway-proxy` then curl the IP |
+| Linux | LoadBalancer EXTERNAL-IP (direct) | `kubectl get svc -n agentgateway-system agentgateway-proxy` then curl the IP |
 | Linux | `kubectl port-forward` | `kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 8080:80` |
-| macOS | `kubectl port-forward` (required — MetalLB IP is not routable from the host) | `kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 8080:80` |
-| macOS | `docker exec` into a kind node | `docker exec gateway-api-lab-control-plane curl ...` against the MetalLB IP |
+| macOS | `kubectl port-forward` (required — LoadBalancer IP is not routable from the host) | `kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 8080:80` |
+| macOS | `docker exec` into a kind node | `docker exec gateway-api-lab-control-plane curl ...` against the LoadBalancer IP |
 
 For the OpenAI Agents SDK test in Section 5, **use port-forward on both platforms** so the script can target `http://localhost:8080/`.
 
@@ -264,14 +265,14 @@ The Microsoft Learn docs explicitly recommend using an agent framework rather th
 
 ### 5.1 Port-forward (both macOS and Linux)
 
-The agentgateway proxy Service has a MetalLB EXTERNAL-IP, but on macOS that IP is not reachable from your host (Docker Desktop runs containers inside a Linux VM). The simplest cross-platform option is port-forward — keep it running in a dedicated terminal:
+The agentgateway proxy Service has a LoadBalancer EXTERNAL-IP, but on macOS that IP is not reachable from your host (Docker Desktop runs containers inside a Linux VM). The simplest cross-platform option is port-forward — keep it running in a dedicated terminal:
 
 ```bash
 kubectl -n agentgateway-system port-forward \
   deployment/agentgateway-proxy 8080:80
 ```
 
-On Linux you can alternatively curl the MetalLB IP directly, but port-forward keeps the rest of this section identical between platforms.
+On Linux you can alternatively curl the LoadBalancer IP directly, but port-forward keeps the rest of this section identical between platforms.
 
 ### 5.2 Install the OpenAI Agents SDK and export your API key
 
@@ -418,12 +419,16 @@ helm uninstall agentgateway-crds -n agentgateway-system
 ### Gateway Not Getting IP
 
 ```bash
-# Check if MetalLB is working
+# Check the Service got a LoadBalancer IP
 kubectl get svc -n agentgateway-system agentgateway-proxy
 
-# If no EXTERNAL-IP, check MetalLB
+# If no EXTERNAL-IP, check your LoadBalancer:
+#   LB_PROVIDER=metallb
 kubectl get pods -n metallb-system
 kubectl get ipaddresspools -n metallb-system
+#   LB_PROVIDER=cilium
+kubectl get ciliumloadbalancerippool
+kubectl get ciliuml2announcementpolicy
 ```
 
 ### MCP Connection Issues
