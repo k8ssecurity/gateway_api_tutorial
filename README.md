@@ -4,6 +4,29 @@ A complete hands-on lab for the Kubernetes Gateway API. You get a local KIND clu
 
 Target audience: network engineers comfortable with Linux/Docker but new to Kubernetes, and AI engineers who want a realistic place to experiment with MCP traffic through a real gateway.
 
+## Which branch should I use?
+
+This lab comes in two flavours that build the **same** Gateway API environment
+but use a different mechanism to hand out `LoadBalancer` IPs. Pick one — you
+don't run both.
+
+| | `main` (this branch) | `cilium-l2-lb` |
+|---|---|---|
+| LoadBalancer IPs | **MetalLB** (separate controller in `metallb-system`) | **Cilium LB-IPAM + L2 announcements** (no extra controller) |
+| Extra pods | MetalLB controller + speakers | none — Cilium is already the CNI |
+| Config objects | `IPAddressPool` + `L2Advertisement` | `CiliumLoadBalancerIPPool` + `CiliumL2AnnouncementPolicy` |
+| Best for | the "classic" on-prem pattern; works with any CNI | a leaner stack when you're already on Cilium; fewer moving parts |
+
+**Rule of thumb:** want a CNI-agnostic LoadBalancer or to learn MetalLB
+specifically? Stay on `main`. Already standardizing on Cilium and want fewer
+moving parts? Use [`cilium-l2-lb`](../../tree/cilium-l2-lb). Both produce the
+same Gateway IPs and identical test commands.
+
+```bash
+git checkout main          # MetalLB (this branch)
+git checkout cilium-l2-lb  # Cilium LB-IPAM + L2 announcements
+```
+
 ## What you get
 
 After `./setup.sh` you have a working cluster with:
