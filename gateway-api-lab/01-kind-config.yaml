@@ -21,6 +21,9 @@ nodes:
   # Control Plane Node - The "brain" of Kubernetes
   # Runs: API Server, Scheduler, Controller Manager, etcd
   - role: control-plane
+    # Pin the Kubernetes version (kindest/node from kind v0.31.0) so this lab
+    # stays on par with the other labs in this org. Cilium 1.19.3 supports it.
+    image: kindest/node:v1.33.7
     kubeadmConfigPatches:
       - |
         kind: InitConfiguration
@@ -45,7 +48,9 @@ nodes:
 
   # Worker Nodes - Where your applications actually run
   - role: worker
+    image: kindest/node:v1.33.7
   - role: worker
+    image: kindest/node:v1.33.7
 
 networking:
   # Disable the default CNI - we'll install Cilium manually

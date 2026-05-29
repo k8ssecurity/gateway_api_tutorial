@@ -94,6 +94,7 @@ The script pins known-working versions so the lab is reproducible:
 
 | Component | Version |
 |---|---|
+| Kubernetes (kind node) | v1.33.7 (kind v0.31.0) |
 | Cilium | 1.19.3 |
 | MetalLB | v0.15.3 |
 | Gateway API | v1.5.0 (Experimental channel) |

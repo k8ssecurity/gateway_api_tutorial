@@ -122,6 +122,7 @@ What `setup.sh` does, in order:
 Pinned versions (kept current — last refreshed May 2026):
 
 ```bash
+KUBERNETES_NODE_IMAGE="kindest/node:v1.33.7"   # kind v0.31.0; pinned to stay on par with other labs
 CILIUM_VERSION="1.19.3"
 METALLB_VERSION="v0.15.3"
 GATEWAY_API_VERSION="v1.5.0"
@@ -1348,7 +1349,7 @@ kind delete cluster --name gateway-api-lab
 
 ---
 
-*Tutorial updated May 2026 | Envoy Gateway v1.7.3 | Cilium v1.19.3 | Gateway API v1.5.0 (Experimental) | MetalLB v0.15.3*
+*Tutorial updated May 2026 | Kubernetes v1.33.7 (kind) | Envoy Gateway v1.7.3 | Cilium v1.19.3 | Gateway API v1.5.0 (Experimental) | MetalLB v0.15.3*
 
 ---
 
