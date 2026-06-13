@@ -1,6 +1,6 @@
 # Agentgateway Setup on KIND
 
-This doc installs the agentgateway control plane, creates an agentgateway proxy (Gateway API `Gateway`), and wires up an MCP server through the gateway.
+This doc installs the agentgateway control plane, creates an agentgateway proxy (Gateway API `Gateway`), wires up an MCP server through the gateway, and routes an agent's OpenAI inference through it — so both the tool and LLM legs of an agent flow through one gateway.
 
 ---
 
@@ -47,7 +47,7 @@ This guide assumes you already have:
 
 ## Automated install (recommended)
 
-As of May 2026, `gateway-api-lab/setup.sh` installs agentgateway and wires the Microsoft Learn MCP server automatically. Running `./setup.sh` with the default `INSTALL_AGENTGATEWAY=true` does steps 1, 2, 3 and 4 of this doc for you. Skip to [Section 5](#5-test-with-the-openai-agents-sdk) if you used the script.
+As of June 2026, `gateway-api-lab/setup.sh` installs agentgateway and wires the Microsoft Learn MCP server automatically. Running `./setup.sh` with the default `INSTALL_AGENTGATEWAY=true` does steps 1, 2, 3 and 4 of this doc for you. Skip to [Section 5](#5-test-with-the-openai-agents-sdk) if you used the script.
 
 To skip the AI-gateway step explicitly:
 
@@ -65,7 +65,7 @@ As of agentgateway v1.0 the project was decoupled from kgateway and the Helm cha
 
 ```bash
 source gateway-api-lab/versions.env          # defines AGENTGATEWAY_VERSION
-export AGW_VERSION="${AGENTGATEWAY_VERSION:-v1.1.0}"
+export AGW_VERSION="${AGENTGATEWAY_VERSION:-v1.2.1}"   # fallback if versions.env isn't sourced
 ```
 
 Install the CRDs (this also creates the `agentgateway-system` namespace):
@@ -129,11 +129,13 @@ kubectl get gateway,deployment,svc -n agentgateway-system
 | Platform | Method | Command |
 |---|---|---|
 | Linux | LoadBalancer EXTERNAL-IP (direct) | `kubectl get svc -n agentgateway-system agentgateway-proxy` then curl the IP |
-| Linux | `kubectl port-forward` | `kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 8080:80` |
-| macOS | `kubectl port-forward` (required — LoadBalancer IP is not routable from the host) | `kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 8080:80` |
+| Linux | `kubectl port-forward` | `kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 8081:80` |
+| macOS | `kubectl port-forward` (required — LoadBalancer IP is not routable from the host) | `kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 8081:80` |
 | macOS | `docker exec` into a kind node | `docker exec gateway-api-lab-control-plane curl ...` against the LoadBalancer IP |
 
-For the OpenAI Agents SDK test in Section 5, **use port-forward on both platforms** so the script can target `http://localhost:8080/`.
+For the OpenAI Agents SDK test in Section 5, **use port-forward on both platforms** so the script can target `http://localhost:8081/`.
+
+> **Port convention.** This lab runs two gateways. Envoy Gateway (the webapp from the main tutorial) uses `8080`/`8443`; **agentgateway uses `8081`**. They're separate Gateway API implementations on separate IPs, so a single local port reaches only one of them — keep them split and both can run at once. All agentgateway commands in this doc use `8081`.
 
 ---
 
@@ -220,7 +222,7 @@ EOF
 
 In another terminal, keep port-forward running:
 ```bash
-kubectl port-forward deployment/agentgateway-proxy -n agentgateway-system 8080:80
+kubectl port-forward deployment/agentgateway-proxy -n agentgateway-system 8081:80
 ```
 
 Run MCP Inspector:
@@ -230,7 +232,7 @@ npx modelcontextprotocol/inspector#0.18.0
 
 Connect:
 - Transport Type: Streamable HTTP
-- URL: `http://localhost:8080/mcp`
+- URL: `http://localhost:8081/mcp`
 
 ---
 
@@ -255,7 +257,7 @@ That single manifest contains:
 
 Clients now reach Microsoft Learn MCP at `http://<agentgateway-proxy>/mcp-mslearn`.
 
-The file also contains a commented-out `AgentgatewayPolicy` snippet you can uncomment to restrict the backend to a single tool (see Section 6 for context).
+The file also contains a commented-out `AgentgatewayPolicy` snippet you can uncomment to restrict the backend to a single tool (see Section 7 for context).
 
 ---
 
@@ -269,7 +271,7 @@ The agentgateway proxy Service has a LoadBalancer EXTERNAL-IP, but on macOS that
 
 ```bash
 kubectl -n agentgateway-system port-forward \
-  deployment/agentgateway-proxy 8080:80
+  deployment/agentgateway-proxy 8081:80
 ```
 
 On Linux you can alternatively curl the LoadBalancer IP directly, but port-forward keeps the rest of this section identical between platforms.
@@ -283,7 +285,7 @@ export OPENAI_API_KEY=sk-...
 
 ### 5.3 Run the included test client
 
-`gateway-api-lab/test-mslearn-agent.py` connects to `http://localhost:8080/mcp-mslearn`, asks the agent a Microsoft-docs question, and prints the answer. Reproduced here for reference — see the file in the repo for the runnable copy:
+`gateway-api-lab/test-mslearn-agent.py` connects to `http://localhost:8081/mcp-mslearn`, asks the agent a Microsoft-docs question, and prints the answer. The snippet below is **simplified to the MCP essentials** — the runnable script in the repo also routes the agent's LLM inference through agentgateway (see [Section 6](#6-route-the-agents-llm-calls-through-the-gateway)), so the two differ slightly:
 
 ```python
 import asyncio, os, sys
@@ -293,7 +295,7 @@ from agents.mcp import MCPServerStreamableHttp
 async def main():
     async with MCPServerStreamableHttp(
         name="Microsoft Learn Docs",
-        params={"url": "http://localhost:8080/mcp-mslearn", "timeout": 30},
+        params={"url": "http://localhost:8081/mcp-mslearn", "timeout": 30},
         cache_tools_list=True,
     ) as mcp_server:
         tools = await mcp_server.list_tools()
@@ -336,11 +338,77 @@ If the Agent hangs or the tool list is empty, the most common causes are:
 
 ---
 
-## 6) Tool allow/deny rules (AgentgatewayPolicy)
+## 6) Route the agent's LLM calls through the gateway
+
+So far only the agent's **tool** calls (MCP) flow through agentgateway — its **LLM inference** still goes straight to `api.openai.com`. Routing inference through the gateway too makes agentgateway the single control point for both legs, which is where the AI-gateway value shows up: the gateway holds the provider credential (the agent never does), and you get one place to enforce model allow-listing, token/cost limits, and rate limiting.
+
+agentgateway has a built-in OpenAI provider for exactly this. The manifest lives in `gateway-api-lab/12-llm-openai.yaml`.
+
+### 6.1 Store the OpenAI key in a Secret
+
+The gateway reads the key from this Secret and injects it into upstream requests — it even overrides any key the client sends, so the agent can use a dummy key:
+
+```bash
+kubectl create secret generic openai-secret -n agentgateway-system \
+  --from-literal=Authorization="Bearer $OPENAI_API_KEY"
+```
+
+### 6.2 Apply the LLM backend + route
+
+```bash
+kubectl apply -f 12-llm-openai.yaml
+```
+
+That manifest contains:
+
+1. **AgentgatewayBackend `openai-llm-backend`** — `spec.ai.provider.openai` (upstream defaults to `api.openai.com:443`, no SNI needed), pinned to `gpt-4o-mini`, with `policies.auth.secretRef` pointing at `openai-secret`.
+2. **HTTPRoute `openai-llm`** — attaches the backend at `/openai`. agentgateway auto-rewrites matched requests to OpenAI's `/v1/chat/completions`.
+
+### 6.3 Smoke-test the LLM path
+
+```bash
+curl -s http://localhost:8081/openai/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}' \
+  | jq -r '.choices[0].message.content // .error.message'
+```
+
+A completion means success; a `401` means the Secret holds a bad key.
+
+### 6.4 How the test client routes inference
+
+`test-mslearn-agent.py` points the OpenAI Agents SDK at `http://localhost:8081/openai`. Two non-obvious details are required:
+
+- **`set_default_openai_api("chat_completions")`** — the SDK defaults to the Responses API, but agentgateway's OpenAI backend exposes Chat Completions; without this the inference leg wouldn't match the backend.
+- the OpenAI client's `api_key` is a **dummy** — the gateway supplies the real key from the Secret, so no `OPENAI_API_KEY` export is needed for the run.
+
+```python
+from openai import AsyncOpenAI
+from agents import set_default_openai_client, set_default_openai_api, set_tracing_disabled
+
+set_default_openai_client(AsyncOpenAI(base_url="http://localhost:8081/openai",
+                                      api_key="routed-via-agentgateway"))
+set_default_openai_api("chat_completions")
+set_tracing_disabled(True)   # the trace exporter would otherwise call OpenAI directly
+```
+
+Re-run the agent and confirm **both** legs traverse the gateway:
+
+```bash
+python3 test-mslearn-agent.py
+kubectl -n agentgateway-system logs deploy/agentgateway-proxy --tail=30 \
+  | grep -E '/openai|/mcp-mslearn'
+```
+
+You should see both `http.path=/openai/chat/completions` and `http.path=/mcp-mslearn` with `http.status=200`.
+
+---
+
+## 7) Tool allow/deny rules (AgentgatewayPolicy)
 
 By default, all MCP tools are allowed. To restrict tools, attach an `AgentgatewayPolicy` to the backend and add CEL expressions.
 
-### 6.1 Example: allow only doc search on Microsoft Learn MCP
+### 7.1 Example: allow only doc search on Microsoft Learn MCP
 
 This restricts the Microsoft Learn backend to a single tool — `microsoft_docs_search`. Re-running the OpenAI Agents SDK test from Section 5 after applying the policy will show only that tool in `mcp_server.list_tools()`, and the agent will be unable to fetch full articles or code samples.
 
@@ -368,7 +436,7 @@ EOF
 
 Re-run `python3 test-mslearn-agent.py` (or reconnect in MCP Inspector) — the tool list should now contain only `microsoft_docs_search`.
 
-### 6.2 Policy-as-code (programmatic management)
+### 7.2 Policy-as-code (programmatic management)
 
 All allow/deny rules are Kubernetes resources:
 - store YAML in Git
@@ -390,7 +458,7 @@ kubectl patch agentgatewaypolicy mslearn-tools-allowlist -n agentgateway-system 
 
 ---
 
-## 7) Cleanup
+## 8) Cleanup
 
 ```bash
 # Option A cleanup (local website-fetcher MCP)
@@ -403,6 +471,10 @@ kubectl delete httproute mcp
 kubectl delete agentgatewaybackend mslearn-mcp-backend -n agentgateway-system
 kubectl delete httproute mcp-mslearn -n agentgateway-system
 kubectl delete agentgatewaypolicy mslearn-tools-allowlist -n agentgateway-system 2>/dev/null || true
+
+# LLM route cleanup (Section 6)
+kubectl delete -f 12-llm-openai.yaml 2>/dev/null || true
+kubectl delete secret openai-secret -n agentgateway-system 2>/dev/null || true
 
 # proxy cleanup
 kubectl delete gateway agentgateway-proxy -n agentgateway-system
@@ -448,7 +520,7 @@ kubectl describe agentgatewaybackend mcp-backend
 ```bash
 # Check policy status
 kubectl get agentgatewaypolicies -A
-kubectl describe agentgatewaypolicy github-tools-allowlist -n agentgateway-system
+kubectl describe agentgatewaypolicy mslearn-tools-allowlist -n agentgateway-system
 ```
 
 ---

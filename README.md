@@ -35,14 +35,14 @@ After `./setup.sh` you have a working cluster with:
 - LoadBalancer IPs from MetalLB **or** Cilium LB-IPAM + L2 (your choice via `LB_PROVIDER`)
 - Gateway API CRDs (Experimental channel)
 - Envoy Gateway routing a sample webapp on HTTP/HTTPS, with stable + canary deployments and example HTTPRoutes for traffic-split, header-match, and TLSRoute passthrough
-- Agentgateway exposing the public Microsoft Learn MCP server at `/mcp-mslearn`
-- An OpenAI Agents SDK test client (`test-mslearn-agent.py`) that drives the MCP server through the gateway
+- Agentgateway exposing the public Microsoft Learn MCP server at `/mcp-mslearn` **and** OpenAI chat completions at `/openai` — so both the tool and the LLM legs of an agent run through one gateway
+- An OpenAI Agents SDK test client (`test-mslearn-agent.py`) that routes **both** its MCP tool calls and its LLM inference through agentgateway
 
 ## Where to read next
 
 - [`testing.md`](testing.md) — **quick guide for driving the lab after `./setup.sh`**. Covers both the Envoy Gateway sample webapp and the agentgateway/Microsoft Learn MCP path, with separate macOS and Linux paths and a small troubleshooting section. Start here if you just want to verify everything works.
 - [`kubernetes-gateway-api-tutorial.md`](kubernetes-gateway-api-tutorial.md) — full tutorial. Walks through the cluster, Cilium, the LoadBalancer (MetalLB or Cilium LB-IPAM), Envoy Gateway, the sample app, and the HTTPRoute/TLSRoute examples step by step. Read this if you want to understand what `setup.sh` did under the hood.
-- [`agentgateway.md`](agentgateway.md) — the AI-gateway extension explained. Installs agentgateway alongside Envoy Gateway, wires Microsoft Learn MCP as an `AgentgatewayBackend`, and discusses tool gating with `AgentgatewayPolicy`. Read this after the main tutorial.
+- [`agentgateway.md`](agentgateway.md) — the AI-gateway extension explained. Installs agentgateway alongside Envoy Gateway, wires Microsoft Learn MCP as an `AgentgatewayBackend`, routes the agent's OpenAI inference through the gateway, and discusses tool gating with `AgentgatewayPolicy`. Read this after the main tutorial.
 
 All three docs assume the same lab folder, so the cluster you build with the first tutorial is the one you test in the second and extend in the third.
 
@@ -86,10 +86,11 @@ INSTALL_AGENTGATEWAY=false ./setup.sh
     ├── 08-httproute-header.yaml           ← Envoy: route by X-Canary header
     ├── 09-tlsroute-passthrough.yaml       ← Envoy: TLS passthrough (SNI-based)
     ├── 10-agentgateway.yaml               ← Agentgateway: proxy Gateway
-    └── 11-mcp-mslearn.yaml                ← Agentgateway: Microsoft Learn MCP route
+    ├── 11-mcp-mslearn.yaml                ← Agentgateway: Microsoft Learn MCP route
+    └── 12-llm-openai.yaml                 ← Agentgateway: OpenAI LLM route (/openai)
 ```
 
-## Pinned versions (May 2026)
+## Pinned versions (June 2026)
 
 All versions live in [`gateway-api-lab/versions.env`](gateway-api-lab/versions.env)
 (the single source of truth — `setup.sh` sources it). Bump them there.
@@ -101,7 +102,7 @@ All versions live in [`gateway-api-lab/versions.env`](gateway-api-lab/versions.e
 | MetalLB (`LB_PROVIDER=metallb`) | v0.15.3 |
 | Gateway API | v1.5.0 (Experimental channel) |
 | Envoy Gateway | v1.7.3 |
-| Agentgateway | v1.1.0 |
+| Agentgateway | v1.2.1 |
 
 ## macOS vs Linux — one thing to know
 
@@ -113,6 +114,8 @@ On macOS, Docker Desktop runs containers inside a Linux VM. The LoadBalancer IPs
 2. `docker exec gateway-api-lab-control-plane curl ...` — runs the request from inside the kind network.
 
 Both tutorials and `setup.sh`'s final output show concrete examples for each path.
+
+> **Port convention** — the lab runs two gateways, so they get different local ports when port-forwarding: **Envoy Gateway (webapp) → `8080`/`8443`, agentgateway (MCP + LLM) → `8081`**. They're separate implementations on separate IPs, so a single port reaches only one of them — keeping them split lets both run at once.
 
 ## Prerequisites
 

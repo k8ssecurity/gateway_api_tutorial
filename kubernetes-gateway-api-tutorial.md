@@ -142,7 +142,7 @@ CILIUM_VERSION="1.19.3"
 METALLB_VERSION="v0.15.3"                # only if LB_PROVIDER/Option A (MetalLB)
 GATEWAY_API_VERSION="v1.5.0"
 ENVOY_GATEWAY_VERSION="v1.7.3"
-AGENTGATEWAY_VERSION="v1.1.0"
+AGENTGATEWAY_VERSION="v1.2.1"
 ```
 
 If anything fails partway through, re-running `./setup.sh` is safe — it deletes the existing cluster and starts fresh.
