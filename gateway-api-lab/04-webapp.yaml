@@ -85,7 +85,11 @@ metadata:
 spec:
   type: ClusterIP                   # Internal-only IP (not exposed externally)
   selector:
-    app: webapp                     # Route to pods with label "app: webapp"
+    app: webapp                     # Route to stable pods only...
+    version: v1                     # ...NOT canary pods (which are app=webapp,version=canary).
+                                    # Without version:v1 this Service also selects the canary
+                                    # pod, leaking stable traffic to it and breaking the
+                                    # 90/10 split in 07-httproute-canary.yaml.
   ports:
     - name: http
       port: 80                      # Service listens on port 80
