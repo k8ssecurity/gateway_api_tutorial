@@ -33,6 +33,32 @@ spec:
     - name: http
       protocol: HTTP
       port: 80
+      # allowedRoutes controls WHICH namespaces may attach HTTPRoutes to this
+      # listener. This is the route -> Gateway permission, and the *Gateway
+      # owner* sets it (separate from the route -> Service permission, which the
+      # Service owner sets via a ReferenceGrant — see 13-referencegrant-crossns.yaml).
+      #
+      # from: can be one of:
+      #   Same     -> only routes in this Gateway's namespace (envoy-gateway-system).
+      #               This is the Gateway API DEFAULT if allowedRoutes is omitted.
+      #   All      -> routes from ANY namespace (used here so demo-app routes can attach).
+      #   Selector -> only routes from namespaces matching a label selector.
+      #
+      # The lab uses `All` for simplicity. In production you'd usually tighten
+      # this to `Selector` so only sanctioned namespaces can hang routes off a
+      # shared gateway — least privilege, the same instinct as ReferenceGrant.
+      # To do that, replace the two lines below with:
+      #
+      #   allowedRoutes:
+      #     namespaces:
+      #       from: Selector
+      #       selector:
+      #         matchLabels:
+      #           gateway-access: "true"   # any label key/value you choose
+      #
+      # ...then label the namespaces you want to allow:
+      #   kubectl label namespace demo-app gateway-access=true
+      #
       allowedRoutes:
         namespaces:
           from: All                 # Accept routes from any namespace
@@ -42,6 +68,9 @@ spec:
     - name: https
       protocol: HTTPS
       port: 443
+      # Same as the http listener above — switch `from: All` to a `Selector`
+      # to restrict which namespaces may attach routes here. See the comment on
+      # the http listener for the full Selector example.
       allowedRoutes:
         namespaces:
           from: All
