@@ -43,11 +43,20 @@ agentgateway and incorporate the results into its answer.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 
 from agents import Agent, Runner
 from agents.mcp import MCPServerStreamableHttp
+
+
+# The agentgateway proxy replies to the session-ending DELETE with HTTP 202
+# (Accepted) — a valid success. The MCP streamable-HTTP client, however, only
+# treats 200/204 as success and logs "Session termination failed: 202" as a
+# warning. The session does terminate correctly, so this is a false alarm;
+# silence that one logger to avoid the misleading message on clean shutdown.
+logging.getLogger("mcp.client.streamable_http").setLevel(logging.ERROR)
 
 
 # URL of the agentgateway proxy listener (matches the HTTPRoute path prefix
