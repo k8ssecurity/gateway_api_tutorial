@@ -142,6 +142,15 @@ This drives the public Microsoft Learn MCP server (`https://learn.microsoft.com/
 
 ### 2.1 Port-forward the agentgateway proxy (both platforms)
 
+> **macOS — stop the Section 1 port-forward first.** This step reuses port `8080`, but it points at a **different** target (`deployment/agentgateway-proxy`, not the Envoy Gateway service from Section 1 / Option A). If the Option A `kubectl port-forward` is still running, you must stop it (`Ctrl-C` in that terminal, or `kill` the process) and start a **new** one with the command below. Leaving the old forward running means `:8080` still routes to the Envoy Gateway, which has no `/mcp-mslearn` route — requests 404, and the OpenAI Agents SDK reports the failed `initialize` as the misleading `McpError: Session terminated`.
+>
+> Check what's bound to `:8080` before starting:
+>
+> ```bash
+> lsof -nP -iTCP:8080 -sTCP:LISTEN
+> # If a kubectl port-forward to envoy-gateway-system is shown, kill it first.
+> ```
+
 ```bash
 kubectl -n agentgateway-system port-forward \
   deployment/agentgateway-proxy 8080:80
@@ -282,12 +291,33 @@ The pool's IP range must overlap the IPv4 subnet shown by `docker network inspec
 
 ### `kubectl port-forward` says "address already in use"
 
-Another process is on the port. Pick a different host port:
+Another process is on the port — often the **Section 1 (Option A)** port-forward to the Envoy Gateway, which also binds `:8080`. Either stop that one and start the agentgateway forward (Section 2.1), or pick a different host port:
 
 ```bash
-kubectl -n envoy-gateway-system port-forward svc/$SVC 9090:80 9443:443
-# then use http://localhost:9090/ and https://localhost:9443/
+kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 9090:80
+# then point AGENTGATEWAY_URL at http://localhost:9090/mcp-mslearn
 ```
+
+Don't silently keep using the old `:8080` forward — it still routes to the Envoy Gateway (no `/mcp-mslearn` route), so you'll get 404s surfaced as `McpError: Session terminated`.
+
+### `McpError: Session terminated` on connect / `initialize`
+
+The streamable-HTTP client flattens any non-2xx from the gateway into this generic error — it usually means the `initialize` POST reached the **wrong target**, not that a session was killed. The common cause is a stale `:8080` port-forward pointing at the Envoy Gateway from Section 1 instead of `agentgateway-proxy`.
+
+```bash
+# Confirm what :8080 actually points at
+lsof -nP -iTCP:8080 -sTCP:LISTEN
+ps aux | grep "port-forward" | grep -v grep   # check the namespace/target
+
+# A raw initialize should return the MS Learn server, not a 404:
+curl -sS -X POST http://localhost:8080/mcp-mslearn \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-06-18' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+```
+
+If that 404s, kill the wrong port-forward and start the one in Section 2.1.
 
 ### Agent hangs on `list_tools()`
 
