@@ -81,9 +81,10 @@ spec:
 #    kubectl describe httproute mcp-mslearn -n agentgateway-system
 #    # Look for Accepted=True and ResolvedRefs=True on the parent.
 #
-# 3. Port-forward (works on both macOS and Linux):
+# 3. Port-forward (works on both macOS and Linux). Port 8081 by lab convention,
+#    so it never collides with the Envoy webapp forward on 8080:
 #    kubectl -n agentgateway-system port-forward \
-#      deployment/agentgateway-proxy 8080:80
+#      deployment/agentgateway-proxy 8081:80
 #
 # 4. In another terminal, run the OpenAI Agents SDK test client:
 #    pip install --upgrade openai-agents

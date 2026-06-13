@@ -2,31 +2,36 @@
 OpenAI Agents SDK + Microsoft Learn MCP via Agentgateway
 ========================================================
 
-This script validates the end-to-end path:
+This script validates that BOTH legs of the agent run through agentgateway:
 
     OpenAI Agents SDK (Agent + Runner)
-        |
-        v
-    MCPServerStreamableHttp -> http://localhost:8080/mcp-mslearn  (port-forward)
-        |
-        v
-    agentgateway proxy (Service in agentgateway-system)
-        |
-        v
-    AgentgatewayBackend "mslearn-mcp-backend"
-        |
-        v
-    https://learn.microsoft.com/api/mcp  (Microsoft Learn MCP, public, anonymous)
+        |                      |
+        | LLM inference        | MCP tool calls
+        v                      v
+    http://localhost:8081/openai      http://localhost:8081/mcp-mslearn
+        |                      |
+        +----------+-----------+
+                   v
+        agentgateway proxy (agentgateway-system)
+           |                         |
+           v                         v
+   api.openai.com/v1/chat/...   learn.microsoft.com/api/mcp
+   (12-llm-openai.yaml)         (11-mcp-mslearn.yaml)
 
 Prerequisites
 -------------
 1. The lab cluster is up with setup.sh INSTALL_AGENTGATEWAY=true (the default).
-2. A port-forward is running in another terminal:
+2. The OpenAI API key Secret exists (the gateway injects it, see 12-llm-openai.yaml):
+
+       kubectl create secret generic openai-secret -n agentgateway-system \
+           --from-literal=Authorization="Bearer $OPENAI_API_KEY"
+
+3. A port-forward to agentgateway is running in another terminal (port 8081 by
+   convention, so it never collides with the Envoy webapp forward on 8080):
 
        kubectl -n agentgateway-system port-forward \
-           deployment/agentgateway-proxy 8080:80
+           deployment/agentgateway-proxy 8081:80
 
-3. OPENAI_API_KEY is exported in your shell.
 4. openai-agents is installed:
 
        pip install --upgrade openai-agents
@@ -47,7 +52,14 @@ import logging
 import os
 import sys
 
-from agents import Agent, Runner
+from openai import AsyncOpenAI
+from agents import (
+    Agent,
+    Runner,
+    set_default_openai_api,
+    set_default_openai_client,
+    set_tracing_disabled,
+)
 from agents.mcp import MCPServerStreamableHttp
 
 
@@ -59,32 +71,59 @@ from agents.mcp import MCPServerStreamableHttp
 logging.getLogger("mcp.client.streamable_http").setLevel(logging.ERROR)
 
 
-# URL of the agentgateway proxy listener (matches the HTTPRoute path prefix
-# /mcp-mslearn that setup.sh creates).
-AGENTGATEWAY_URL = os.environ.get(
-    "AGENTGATEWAY_URL",
-    "http://localhost:8080/mcp-mslearn",
-)
+# Base URL of the agentgateway proxy listener. BOTH legs of this agent — the
+# MCP tool calls AND the LLM inference calls — go through this one gateway:
+#   <base>/mcp-mslearn  -> Microsoft Learn MCP   (11-mcp-mslearn.yaml)
+#   <base>/openai       -> OpenAI chat completions (12-llm-openai.yaml)
+#
+# Port convention for this lab (avoids the two gateways fighting over a port):
+#   localhost:8080 / 8443 -> Envoy Gateway   (webapp HTTP/TLS routes)
+#   localhost:8081        -> agentgateway    (MCP + LLM, this script)
+# Start the agentgateway forward with:
+#   kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 8081:80
+GATEWAY_BASE = os.environ.get("AGENTGATEWAY_URL", "http://localhost:8081").rstrip("/")
+MCP_URL = f"{GATEWAY_BASE}/mcp-mslearn"
+LLM_URL = f"{GATEWAY_BASE}/openai"
 
 # The model used by the Agent. Override with OPENAI_MODEL if you want a
 # cheaper/faster or a stronger model.
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 
-async def main() -> int:
-    if "OPENAI_API_KEY" not in os.environ:
-        print(
-            "error: OPENAI_API_KEY is not set. Export it before running this script.",
-            file=sys.stderr,
-        )
-        return 2
+# Route the OpenAI Agents SDK's inference calls through agentgateway instead of
+# straight to api.openai.com.
+#
+# - base_url points the OpenAI client at the gateway's /openai route. The SDK
+#   posts to "<base_url>/chat/completions", i.e. /openai/chat/completions.
+# - api_key is intentionally a DUMMY: the gateway injects the real key from the
+#   "openai-secret" Secret and overrides whatever the client sends, so the agent
+#   never holds the provider credential. (Set a real OPENAI_API_KEY only if you
+#   remove the gateway's auth policy.)
+# - set_default_openai_api("chat_completions"): the SDK defaults to the Responses
+#   API, but agentgateway's OpenAI backend exposes Chat Completions — without
+#   this the requests would not match the backend.
+# - tracing is disabled because the SDK's trace exporter would otherwise call
+#   api.openai.com directly with the dummy key.
+set_default_openai_client(
+    AsyncOpenAI(
+        base_url=LLM_URL,
+        api_key=os.environ.get("OPENAI_API_KEY", "routed-via-agentgateway"),
+    )
+)
+set_default_openai_api("chat_completions")
+set_tracing_disabled(True)
 
-    print(f"Connecting to Microsoft Learn MCP via {AGENTGATEWAY_URL}", file=sys.stderr)
+
+async def main() -> int:
+    print(
+        f"Routing LLM inference via {LLM_URL} and MCP via {MCP_URL}",
+        file=sys.stderr,
+    )
 
     async with MCPServerStreamableHttp(
         name="Microsoft Learn Docs",
         params={
-            "url": AGENTGATEWAY_URL,
+            "url": MCP_URL,
             "timeout": 30,
         },
         cache_tools_list=True,

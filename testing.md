@@ -142,18 +142,18 @@ This drives the public Microsoft Learn MCP server (`https://learn.microsoft.com/
 
 ### 2.1 Port-forward the agentgateway proxy (both platforms)
 
-> **macOS — stop the Section 1 port-forward first.** This step reuses port `8080`, but it points at a **different** target (`deployment/agentgateway-proxy`, not the Envoy Gateway service from Section 1 / Option A). If the Option A `kubectl port-forward` is still running, you must stop it (`Ctrl-C` in that terminal, or `kill` the process) and start a **new** one with the command below. Leaving the old forward running means `:8080` still routes to the Envoy Gateway, which has no `/mcp-mslearn` route — requests 404, and the OpenAI Agents SDK reports the failed `initialize` as the misleading `McpError: Session terminated`.
+> **Port convention — this lab runs two gateways, so give each its own local port.** The Envoy Gateway (Section 1, webapp) uses `8080`/`8443`; **agentgateway uses `8081`**. They are different Gateway API implementations on different IPs, so a single port can only reach one of them. Sticking to this split lets both run at the same time and avoids the classic trap where `:8080` still points at Envoy (no `/mcp-mslearn` route → 404, surfaced by the SDK as the misleading `McpError: Session terminated`).
 >
-> Check what's bound to `:8080` before starting:
+> | Gateway | Namespace | Local port |
+> |---|---|---|
+> | Envoy Gateway (webapp) | `envoy-gateway-system` | `8080` / `8443` |
+> | agentgateway (MCP + LLM) | `agentgateway-system` | `8081` |
 >
-> ```bash
-> lsof -nP -iTCP:8080 -sTCP:LISTEN
-> # If a kubectl port-forward to envoy-gateway-system is shown, kill it first.
-> ```
+> Check the port is free before starting: `lsof -nP -iTCP:8081 -sTCP:LISTEN`
 
 ```bash
 kubectl -n agentgateway-system port-forward \
-  deployment/agentgateway-proxy 8080:80
+  deployment/agentgateway-proxy 8081:80
 ```
 
 Leave that running. On Linux you could alternatively curl the MetalLB IP `172.x.255.201` directly, but port-forward keeps the rest of this section identical between platforms.
@@ -169,29 +169,57 @@ pip install --upgrade openai-agents
 
 A fresh venv per lab session avoids dependency conflicts with other Python tooling on your machine.
 
-### 2.3 Export your OpenAI API key and run the test
+### 2.3 Route the agent's LLM calls through agentgateway too
+
+The agent makes two kinds of calls: MCP tool calls (already routed via `/mcp-mslearn`) and **LLM inference**. `test-mslearn-agent.py` routes the inference through agentgateway as well, at `/openai`, so the gateway is the single control point for both legs — and the agent never holds the OpenAI key.
+
+Store your key in a Secret. The gateway reads it and injects it into upstream requests (it even overrides any key the client sends), so the agent itself uses a dummy key:
 
 ```bash
-export OPENAI_API_KEY=sk-...
+kubectl create secret generic openai-secret -n agentgateway-system \
+  --from-literal=Authorization="Bearer $OPENAI_API_KEY"
+```
+
+Apply the LLM backend + route, and smoke-test the path through the gateway (a chat completion = success; `401` = the Secret holds a bad key):
+
+```bash
+kubectl apply -f gateway-api-lab/12-llm-openai.yaml
+
+curl -s http://localhost:8081/openai/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}' \
+  | jq -r '.choices[0].message.content // .error.message'
+```
+
+### 2.4 Run the agent (both legs through agentgateway)
+
+```bash
 python3 test-mslearn-agent.py
 ```
+
+No `OPENAI_API_KEY` export is needed for the run — the gateway supplies the key from the Secret. The script points the OpenAI SDK at `http://localhost:8081/openai` and the MCP client at `http://localhost:8081/mcp-mslearn`.
 
 What you should see:
 
 1. On stderr, the list of tools Microsoft Learn MCP exposes (typically `microsoft_docs_search`, `microsoft_docs_fetch`, plus a few related tools).
 2. On stdout, a cited multi-paragraph answer about Azure App Service with `learn.microsoft.com/...` URLs inline.
 
-### 2.4 About the trailing "Session termination failed: 202"
+Confirm **both** legs traversed the gateway:
 
-After the agent answer, you'll see:
-
+```bash
+kubectl -n agentgateway-system logs deploy/agentgateway-proxy --tail=30 \
+  | grep -E '/openai|/mcp-mslearn'
 ```
-Session termination failed: 202
-```
 
-This is **cosmetic**. When the SDK closes the MCP session, Microsoft Learn responds with HTTP 202 (Accepted) rather than 200 (OK). The openai-agents SDK strictly expects 200 and logs the 202 as a "failure" — but the agent's answer has already been returned successfully before that line prints. You can ignore it.
+You should see `http.path=/openai/chat/completions` (the inference) and `http.path=/mcp-mslearn` (the tools), both with `http.status=200`.
 
-### 2.5 (Optional) Restrict the tool list with an AgentgatewayPolicy
+> **Note on the OpenAI Agents SDK + agentgateway:** the script calls `set_default_openai_api("chat_completions")` because the SDK defaults to the Responses API, while agentgateway's OpenAI backend exposes Chat Completions. Without that switch the inference leg would not match the backend.
+
+### 2.5 About the trailing "Session termination failed: 202"
+
+When the SDK closes the MCP session, agentgateway answers the terminating `DELETE` with HTTP 202 (Accepted) — a valid success. The MCP streamable-HTTP client only treats 200/204 as success, so it logs `Session termination failed: 202`. It is harmless (the session does terminate), and the agent's answer prints before it. `test-mslearn-agent.py` already silences this by raising the log level on `mcp.client.streamable_http`; if you write your own client, expect the line or suppress it the same way.
+
+### 2.6 (Optional) Restrict the tool list with an AgentgatewayPolicy
 
 To prove gateway-level tool gating works, apply the commented-out policy at the bottom of `11-mcp-mslearn.yaml`, or apply this directly:
 
@@ -289,43 +317,41 @@ docker network inspect kind \
 
 The pool's IP range must overlap the IPv4 subnet shown by `docker network inspect`. If the Docker network is on `172.20.x.x` but the pool is on `172.18.x.x`, the LoadBalancer has nothing to advertise. Re-run `setup.sh` — it auto-detects the IPv4 subnet correctly.
 
-### `kubectl port-forward` says "address already in use"
+### `404` / `route not found` / `McpError: Session terminated` — wrong gateway on the port
 
-Another process is on the port — often the **Section 1 (Option A)** port-forward to the Envoy Gateway, which also binds `:8080`. Either stop that one and start the agentgateway forward (Section 2.1), or pick a different host port:
-
-```bash
-kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 9090:80
-# then point AGENTGATEWAY_URL at http://localhost:9090/mcp-mslearn
-```
-
-Don't silently keep using the old `:8080` forward — it still routes to the Envoy Gateway (no `/mcp-mslearn` route), so you'll get 404s surfaced as `McpError: Session terminated`.
-
-### `McpError: Session terminated` on connect / `initialize`
-
-The streamable-HTTP client flattens any non-2xx from the gateway into this generic error — it usually means the `initialize` POST reached the **wrong target**, not that a session was killed. The common cause is a stale `:8080` port-forward pointing at the Envoy Gateway from Section 1 instead of `agentgateway-proxy`.
+This lab runs two gateways; each has its own local port (see the table in Section 2.1): **Envoy = 8080/8443, agentgateway = 8081**. If you hit the wrong port you reach the wrong gateway, and that gateway has no matching route → `404`. The streamable-HTTP MCP client flattens any non-2xx into the generic `McpError: Session terminated`, so a 404 from Envoy on `:8080` looks like a session was killed when really the `initialize` POST just reached the wrong gateway.
 
 ```bash
-# Confirm what :8080 actually points at
-lsof -nP -iTCP:8080 -sTCP:LISTEN
+# Confirm what each port points at
+lsof -nP -iTCP:8081 -sTCP:LISTEN     # should be the agentgateway forward
 ps aux | grep "port-forward" | grep -v grep   # check the namespace/target
 
-# A raw initialize should return the MS Learn server, not a 404:
-curl -sS -X POST http://localhost:8080/mcp-mslearn \
+# A raw initialize on 8081 should return the MS Learn server, not a 404:
+curl -sS -X POST http://localhost:8081/mcp-mslearn \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -H 'MCP-Protocol-Version: 2025-06-18' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
 ```
 
-If that 404s, kill the wrong port-forward and start the one in Section 2.1.
+If that 404s, your `:8081` forward isn't pointing at `agentgateway-proxy` — restart it per Section 2.1.
+
+### `kubectl port-forward` says "address already in use"
+
+Another process holds the port. If it's a duplicate agentgateway forward, kill it; otherwise pick a different host port and point the script at it via `AGENTGATEWAY_URL`:
+
+```bash
+kubectl -n agentgateway-system port-forward deployment/agentgateway-proxy 9091:80
+export AGENTGATEWAY_URL=http://localhost:9091   # script derives /mcp-mslearn and /openai
+```
 
 ### Agent hangs on `list_tools()`
 
 Either the port-forward isn't running, or the backend's `protocol:` doesn't match the upstream's transport.
 
 ```bash
-# Is the port-forward listening?
-lsof -iTCP:8080 -sTCP:LISTEN
+# Is the agentgateway port-forward listening?
+lsof -iTCP:8081 -sTCP:LISTEN
 
 # Are there agentgateway errors during the request?
 kubectl logs -n agentgateway-system deployment/agentgateway --tail=100 -f
@@ -333,9 +359,21 @@ kubectl logs -n agentgateway-system deployment/agentgateway --tail=100 -f
 
 `11-mcp-mslearn.yaml` declares `protocol: StreamableHTTP`, which matches Microsoft Learn's transport. Don't change it to `SSE` unless you swap the upstream too.
 
-### `OPENAI_API_KEY` is set but the agent fails authentication
+### LLM calls fail with `401` / authentication error
 
-The key may have expired or hit a rate limit. The test script prints the OpenAI SDK error directly — read the message and check at https://platform.openai.com/usage.
+The agent's inference now flows through agentgateway, which injects the key from the `openai-secret` Secret — so a 401 means that Secret holds a bad/expired key (not your shell's `OPENAI_API_KEY`). Re-create it and confirm the value is the full `Bearer sk-...` header:
+
+```bash
+kubectl delete secret openai-secret -n agentgateway-system
+kubectl create secret generic openai-secret -n agentgateway-system \
+  --from-literal=Authorization="Bearer $OPENAI_API_KEY"
+
+# Test the LLM path directly (a 401 body echoes the masked key the gateway sent):
+curl -s http://localhost:8081/openai/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}' | jq
+```
+
+Check usage/limits at https://platform.openai.com/usage.
 
 ### "Hello from Gateway API!" never appears
 

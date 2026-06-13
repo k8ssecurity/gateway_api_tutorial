@@ -1,0 +1,117 @@
+# =============================================================================
+# OpenAI LLM - AgentgatewayBackend + HTTPRoute
+# =============================================================================
+#
+# WHAT THIS DOES:
+# Exposes OpenAI's Chat Completions API through the agentgateway-proxy from
+# 10-agentgateway.yaml at the path /openai. This puts the *inference* leg of
+# the agent behind the same gateway that already proxies the MCP tool leg
+# (11-mcp-mslearn.yaml), so BOTH legs of test-mslearn-agent.py flow through
+# agentgateway:
+#
+#   Agent ──/openai────────> agentgateway ──HTTPS──> api.openai.com/v1/chat/completions
+#   Agent ──/mcp-mslearn───> agentgateway ──HTTPS──> learn.microsoft.com/api/mcp
+#
+# Why route LLM calls through the gateway? Centralized credential management
+# (the client never holds the OpenAI key — the gateway injects it), plus
+# model allow-listing, token/cost metering, rate limiting, and observability.
+#
+# Reference (agentgateway v1.1.x, matches the installed proxy):
+#   https://agentgateway.dev/docs/kubernetes/1.1.x/quickstart/llm/
+#
+# PREREQUISITES:
+# - 10-agentgateway.yaml applied and the Gateway is Programmed.
+# - Cluster egress to api.openai.com:443.
+# - The OpenAI API key stored in a Secret named "openai-secret" (see below).
+#
+# -----------------------------------------------------------------------------
+# STEP 0 (do this first — NOT committed to git): create the API-key Secret.
+# The gateway reads the key from this Secret's "Authorization" field and adds
+# it to upstream requests, so the agent itself can use a dummy key.
+#
+#   export OPENAI_API_KEY=sk-...          # your real key
+#   kubectl create secret generic openai-secret \
+#     -n agentgateway-system \
+#     --from-literal=Authorization="Bearer $OPENAI_API_KEY"
+#
+# (Equivalent to the docs' stringData form; the value must be the full
+#  "Bearer sk-..." Authorization header value.)
+# =============================================================================
+
+---
+# AgentgatewayBackend - describes OpenAI as an AI provider to agentgateway.
+#
+# - ai.provider.openai — built-in OpenAI provider. Upstream defaults to
+#   api.openai.com:443 over TLS, so no host/port/SNI is needed (unlike the
+#   MCP backend, which targets a custom host).
+# - openai.model — pins the model. The agent sends gpt-4o-mini too; pinning
+#   here also lets the gateway enforce/allow-list the model centrally.
+# - policies.auth.secretRef — the gateway injects the Authorization header
+#   from the openai-secret Secret. Inline `key:` is also possible but less
+#   secure; a Secret is preferred.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: openai-llm-backend
+  namespace: agentgateway-system
+spec:
+  ai:
+    provider:
+      openai:
+        model: gpt-4o-mini
+  policies:
+    auth:
+      secretRef:
+        name: openai-secret
+
+---
+# HTTPRoute - attaches the OpenAI backend to the proxy at the path /openai.
+# agentgateway automatically rewrites matched requests to OpenAI's
+# /v1/chat/completions endpoint. The OpenAI SDK posts to
+# "<base_url>/chat/completions", so with base_url=http://localhost:8080/openai
+# the request path is /openai/chat/completions, which this PathPrefix matches.
+#
+# The prefix keeps this route cleanly separated from /mcp-mslearn on the same
+# gateway.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: openai-llm
+  namespace: agentgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      namespace: agentgateway-system
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /openai
+      backendRefs:
+        - name: openai-llm-backend
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+
+# =============================================================================
+# HOW TO TEST (raw curl, proves the gateway -> OpenAI path):
+# =============================================================================
+#
+#   curl -s http://localhost:8081/openai/chat/completions \
+#     -H 'content-type: application/json' \
+#     -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}' | jq
+#
+# (Port 8081 by lab convention: agentgateway on 8081, Envoy webapp on 8080.)
+#
+# With a valid openai-secret you get a chat completion. With a bad/placeholder
+# key you get an OpenAI 401 — which still proves the request reached OpenAI
+# *through agentgateway*.
+#
+# Then run the agent (it routes BOTH inference and MCP through the gateway):
+#   python3 test-mslearn-agent.py
+#
+# =============================================================================
+# CLEANUP:
+# =============================================================================
+#   kubectl delete -f 12-llm-openai.yaml
+#   kubectl delete secret openai-secret -n agentgateway-system
+# =============================================================================
