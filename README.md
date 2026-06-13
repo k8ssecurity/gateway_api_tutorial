@@ -34,7 +34,7 @@ After `./setup.sh` you have a working cluster with:
 - Cilium CNI with kube-proxy replacement
 - LoadBalancer IPs from MetalLB **or** Cilium LB-IPAM + L2 (your choice via `LB_PROVIDER`)
 - Gateway API CRDs (Experimental channel)
-- Envoy Gateway routing a sample webapp on HTTP/HTTPS, with stable + canary deployments and example HTTPRoutes for traffic-split, header-match, and TLSRoute passthrough
+- Envoy Gateway routing a sample webapp on HTTP/HTTPS, with stable + canary deployments and example HTTPRoutes for traffic-split, header-match, cross-namespace routing (ReferenceGrant), and TLSRoute passthrough
 - Agentgateway exposing the public Microsoft Learn MCP server at `/mcp-mslearn` **and** OpenAI chat completions at `/openai` — so both the tool and the LLM legs of an agent run through one gateway
 - An OpenAI Agents SDK test client (`test-mslearn-agent.py`) that routes **both** its MCP tool calls and its LLM inference through agentgateway
 
@@ -87,7 +87,8 @@ INSTALL_AGENTGATEWAY=false ./setup.sh
     ├── 09-tlsroute-passthrough.yaml       ← Envoy: TLS passthrough (SNI-based)
     ├── 10-agentgateway.yaml               ← Agentgateway: proxy Gateway
     ├── 11-mcp-mslearn.yaml                ← Agentgateway: Microsoft Learn MCP route
-    └── 12-llm-openai.yaml                 ← Agentgateway: OpenAI LLM route (/openai)
+    ├── 12-llm-openai.yaml                 ← Agentgateway: OpenAI LLM route (/openai)
+    └── 13-referencegrant-crossns.yaml     ← Envoy: cross-namespace route + ReferenceGrant
 ```
 
 ## Pinned versions (June 2026)

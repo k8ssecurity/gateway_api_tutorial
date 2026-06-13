@@ -289,7 +289,61 @@ curl -H 'Host: webapp.local.dev' -H 'X-Canary: true' http://$GATEWAY_IP/
 kubectl apply -f gateway-api-lab/06-httproute-basic.yaml
 ```
 
-### 3.4 TLS passthrough (TLSRoute)
+### 3.4 Cross-namespace routing with ReferenceGrant
+
+By default an HTTPRoute may only forward to a backend Service in **its own namespace**. Pointing a `backendRef` at a Service in another namespace is denied until the *target* namespace consents with a `ReferenceGrant`. This example proves it by failing first, then granting.
+
+Apply the backend (in a new `demo-backend` namespace) and the route (in `demo-app`) — but **not** the grant yet:
+
+```bash
+kubectl apply -f gateway-api-lab/13-referencegrant-crossns.yaml
+```
+
+The route is `Accepted` but its refs are **not** resolved — confirm the deny:
+
+```bash
+kubectl -n demo-app get httproute webapp-route-external \
+  -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}'
+# -> Accepted=True(Accepted) ResolvedRefs=False(RefNotPermitted)
+
+curl -s -o /dev/null -w "%{http_code}\n" -H 'Host: webapp.local.dev' http://$GATEWAY_IP/external
+# -> 500  (no permitted backend)
+```
+
+Now apply the `ReferenceGrant` — note it lives in the **target** namespace (`demo-backend`), because the owner of the Service is the one who consents:
+
+```bash
+kubectl apply -f- <<'EOF'
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-demo-app-httproutes
+  namespace: demo-backend
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: demo-app
+  to:
+    - group: ""
+      kind: Service
+EOF
+```
+
+The same route now resolves and serves the cross-namespace backend:
+
+```bash
+kubectl -n demo-app get httproute webapp-route-external \
+  -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {end}{"\n"}'
+# -> Accepted=True ResolvedRefs=True
+
+curl -s -H 'Host: webapp.local.dev' http://$GATEWAY_IP/external
+# -> Hello from the demo-backend namespace (reached cross-namespace via ReferenceGrant)! ...
+```
+
+Delete the grant again and `/external` immediately goes back to 500 — the grant is the only thing permitting the hop. (Existing routes on `webapp.local.dev` are untouched; `/external` is a longer path prefix than the canary route's `/`.)
+
+### 3.5 TLS passthrough (TLSRoute)
 
 See [Part 7.4 of the main tutorial](kubernetes-gateway-api-tutorial.md#74-tls-passthrough-with-tlsroute) — it deploys an extra TLS-enabled nginx backend with its own cert, plus a passthrough Gateway on port 8443. Useful to compare end-to-end-encrypted vs gateway-terminated TLS.
 

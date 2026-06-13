@@ -1258,7 +1258,70 @@ kubectl delete configmap nginx-tls-config -n demo-app
 kubectl delete secret backend-tls-cert -n demo-app
 ```
 
-### 7.5: Reset to Basic Routing
+### 7.5: Cross-Namespace Routing with ReferenceGrant
+
+So far every HTTPRoute has forwarded to a Service in **its own namespace** (`demo-app`). The Gateway API denies cross-namespace `backendRef`s by default — a route owner in one namespace can't silently send traffic to a Service they don't own in another. The target namespace must opt in with a **ReferenceGrant**. This is a security control, not a convenience toggle.
+
+The lab ships a ready example in `gateway-api-lab/13-referencegrant-crossns.yaml`: it creates a second namespace `demo-backend` with its own echo backend, plus an HTTPRoute in `demo-app` that points at `demo-backend` via path `/external`.
+
+**Step 1 — apply the backend and route (no grant yet):**
+
+```bash
+kubectl apply -f gateway-api-lab/13-referencegrant-crossns.yaml
+```
+
+**Step 2 — observe the deny.** The route is `Accepted` but its refs are rejected:
+
+```bash
+kubectl -n demo-app get httproute webapp-route-external \
+  -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status}({.reason}) {end}{"\n"}'
+# Accepted=True(Accepted) ResolvedRefs=False(RefNotPermitted)
+
+# (macOS: docker exec gateway-api-lab-control-plane curl ... ; Linux: curl $GATEWAY_IP directly)
+curl -s -o /dev/null -w "%{http_code}\n" -H 'Host: webapp.local.dev' http://$GATEWAY_IP/external
+# 500 — no permitted backend
+```
+
+**Step 3 — grant the reference.** The `ReferenceGrant` lives in the **target** namespace (`demo-backend`), because the Service owner is the one who consents:
+
+```bash
+kubectl apply -f - <<EOF
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-demo-app-httproutes
+  namespace: demo-backend
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: demo-app
+  to:
+    - group: ""
+      kind: Service          # omit name: to allow all Services in this namespace
+EOF
+```
+
+**Step 4 — verify it now resolves:**
+
+```bash
+kubectl -n demo-app get httproute webapp-route-external \
+  -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {end}{"\n"}'
+# Accepted=True ResolvedRefs=True
+
+curl -s -H 'Host: webapp.local.dev' http://$GATEWAY_IP/external
+# Hello from the demo-backend namespace (reached cross-namespace via ReferenceGrant)! ...
+```
+
+Delete the grant and `/external` returns to `500` immediately — the grant is the only thing permitting the hop. The `from`/`to` shape is the whole model: *from* a kind/namespace, *to* a kind (optionally a specific name) in the grant's own namespace.
+
+```bash
+# Cleanup for this example
+kubectl delete referencegrant allow-demo-app-httproutes -n demo-backend
+kubectl delete -f gateway-api-lab/13-referencegrant-crossns.yaml
+```
+
+### 7.6: Reset to Basic Routing
 
 To go back to simple routing:
 

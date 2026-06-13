@@ -1,0 +1,155 @@
+# =============================================================================
+# Cross-namespace routing with ReferenceGrant
+# =============================================================================
+#
+# SECURITY MODEL: In the Gateway API, an HTTPRoute may only forward to a
+# backend Service in ITS OWN namespace by default. Pointing a backendRef at a
+# Service in ANOTHER namespace is denied unless the *target* namespace
+# explicitly opts in with a ReferenceGrant. This stops a route owner in one
+# namespace from hijacking traffic to a Service they don't own in another.
+#
+#   demo-app/webapp-route-external  ──backendRef──>  demo-backend/external-service
+#                                                          ▲
+#                                   allowed only by a ReferenceGrant
+#                                   that lives in demo-backend
+#
+# NETWORK ANALOGY: like a firewall rule that must be added on the *destination*
+# segment before traffic from another segment is accepted — the source can ask,
+# but the destination decides.
+#
+# This manifest creates the cross-namespace backend and the route. The
+# ReferenceGrant is left COMMENTED OUT at the bottom on purpose, so you can
+# watch the route fail "RefNotPermitted" first, then apply the grant and watch
+# it resolve. See testing.md for the step-by-step.
+#
+# Reference:
+#   https://gateway-api.sigs.k8s.io/api-types/referencegrant/
+# =============================================================================
+
+---
+# A separate namespace that owns the backend workload.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-backend
+
+---
+# A tiny echo server in demo-backend, distinct from the demo-app webapp so its
+# response makes the cross-namespace hop obvious.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-app
+  namespace: demo-backend
+  labels:
+    app: external-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: external-app
+  template:
+    metadata:
+      labels:
+        app: external-app
+    spec:
+      containers:
+        - name: external-app
+          image: hashicorp/http-echo:1.0
+          args:
+            - "-text=Hello from the demo-backend namespace (reached cross-namespace via ReferenceGrant)! Pod: $(POD_NAME)"
+            - "-listen=:8080"
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: external-service
+  namespace: demo-backend
+  labels:
+    app: external-app
+spec:
+  type: ClusterIP
+  selector:
+    app: external-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+
+---
+# The HTTPRoute lives in demo-app (alongside the other webapp routes) but its
+# backendRef points into demo-backend — note the explicit `namespace:` field.
+# Path /external is a longer prefix than the canary route's "/", so it wins for
+# that path without disturbing the existing routes on webapp.local.dev.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: webapp-route-external
+  namespace: demo-app
+spec:
+  parentRefs:
+    - name: eg-gateway
+      namespace: envoy-gateway-system
+  hostnames:
+    - "webapp.local.dev"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /external
+      backendRefs:
+        - name: external-service
+          namespace: demo-backend      # <-- cross-namespace: needs a ReferenceGrant
+          port: 80
+
+# =============================================================================
+# THE GRANT (apply this to make the route work)
+# =============================================================================
+# Until this exists, `kubectl describe httproute webapp-route-external -n
+# demo-app` shows ResolvedRefs=False with reason RefNotPermitted, and a request
+# to /external returns an error (no healthy upstream). Apply the grant below and
+# the same route resolves and starts serving the demo-backend response.
+#
+# The ReferenceGrant lives in the TARGET namespace (demo-backend) — the owner of
+# the Service is the one who consents.
+#
+# kubectl apply -f- <<'EOF'
+# apiVersion: gateway.networking.k8s.io/v1beta1
+# kind: ReferenceGrant
+# metadata:
+#   name: allow-demo-app-httproutes
+#   namespace: demo-backend
+# spec:
+#   from:
+#     - group: gateway.networking.k8s.io
+#       kind: HTTPRoute
+#       namespace: demo-app
+#   to:
+#     - group: ""
+#       kind: Service
+#       # name: external-service   # optional: omit to allow all Services in this ns
+# EOF
+#
+# =============================================================================
+# CLEANUP:
+# =============================================================================
+#   kubectl delete referencegrant allow-demo-app-httproutes -n demo-backend 2>/dev/null || true
+#   kubectl delete -f 13-referencegrant-crossns.yaml
+# =============================================================================
