@@ -1,0 +1,83 @@
+# =============================================================================
+# Observe-mode intent guardrail via request MIRRORING
+# =============================================================================
+#
+# agentgateway mirrors a COPY of each request (headers + body) to this server
+# using a Gateway API RequestMirror filter on the route. The live request is
+# untouched and the mirror's response is ignored — so this is a detection /
+# audit / "full trace" sensor, NOT an inline blocker.
+#
+# Unlike inline ext_proc (see ../extproc-guardrail), mirroring does not touch
+# the live path, so it works cleanly on agentgateway v1.2.1.
+#
+# BUILD + LOAD:
+#   cd gateway-api-lab/guardrail-mirror
+#   docker build -t guardrail-mirror:poc .
+#   kind load docker-image guardrail-mirror:poc --name gateway-api-lab
+#
+# Then apply this file, and add the RequestMirror filter to the routes (the
+# patch commands are in guardrail-mirror/README.md).
+# =============================================================================
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guardrail-mirror
+  namespace: agentgateway-system
+  labels:
+    app: guardrail-mirror
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: guardrail-mirror
+  template:
+    metadata:
+      labels:
+        app: guardrail-mirror
+    spec:
+      containers:
+        - name: guardrail-mirror
+          image: guardrail-mirror:poc
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          resources:
+            requests: { memory: "16Mi", cpu: "20m" }
+            limits: { memory: "64Mi", cpu: "100m" }
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: guardrail-mirror
+  namespace: agentgateway-system
+  labels:
+    app: guardrail-mirror
+spec:
+  selector:
+    app: guardrail-mirror
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      appProtocol: http
+
+# =============================================================================
+# Add the RequestMirror filter to the routes you want to observe (same
+# namespace, so no ReferenceGrant needed). Example for the OpenAI route:
+#
+#   rules:
+#     - matches: [...]
+#       filters:
+#         - type: RequestMirror
+#           requestMirror:
+#             backendRef:
+#               name: guardrail-mirror
+#               port: 8080
+#       backendRefs: [...existing...]
+#
+# See README.md for ready-to-run `kubectl patch` commands for openai-llm and
+# mcp-mslearn.
+# =============================================================================
