@@ -104,9 +104,11 @@ echo; hr; echo "7) Trace — access log captured a recent MCP tool call"; hr
 # closes the pipe early, kubectl gets SIGPIPE and the pipeline reports failure.
 # Capture the log to a variable first, then grep the variable.
 logs="$(kubectl -n "$NS" logs deploy/"$GW" --tail=500 2>/dev/null)"
-if printf '%s' "$logs" | has 'trace.mcp='; then
+# Matches both logfmt (trace.mcp=...) and JSON ("trace.mcp":...) encodings,
+# so the check works regardless of 19-json-logging.yaml being applied.
+if printf '%s' "$logs" | has 'trace.mcp'; then
   ok "trace.mcp present in proxy access log"
-  printf '%s' "$logs" | grep -o 'trace.mcp=[^ ]*' | tail -n1 | sed 's/^/      /'
+  printf '%s' "$logs" | grep -oE 'trace.mcp"?[=:][^,]*' | tail -n1 | cut -c1-100 | sed 's/^/      /'
 else
   bad "no trace.mcp line found (is 17-access-log-trace.yaml applied?)"
 fi

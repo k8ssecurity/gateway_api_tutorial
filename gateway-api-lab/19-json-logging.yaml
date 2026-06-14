@@ -1,0 +1,48 @@
+# =============================================================================
+# JSON logging for the agentgateway proxy (optional)
+# =============================================================================
+#
+# By default agentgateway emits human-readable logfmt (key=value) lines. This
+# switches the proxy's structured logger to JSON, so the access-log fields from
+# 17-access-log-trace.yaml (trace.path / trace.req / trace.resp / trace.mcp) and
+# the native gen_ai.usage.* counters become proper JSON keys — easy to pipe into
+# `jq` or ship to a log backend (Loki, Elastic, etc.).
+#
+# The CEL access-log policy (17) is unchanged; `format` only controls encoding.
+#
+# HOW IT ATTACHES:
+#   logging config lives in an AgentgatewayParameters resource, which a Gateway
+#   references via spec.infrastructure.parametersRef. We attach it to the EXISTING
+#   agentgateway-proxy Gateway (from 10-agentgateway.yaml) with a patch, so this
+#   stays an opt-in toggle and doesn't duplicate the Gateway definition.
+#
+# APPLY:
+#   kubectl apply -f 19-json-logging.yaml
+#   kubectl -n agentgateway-system patch gateway agentgateway-proxy --type merge \
+#     -p '{"spec":{"infrastructure":{"parametersRef":{"group":"agentgateway.dev","kind":"AgentgatewayParameters","name":"agentgateway-json-logging"}}}}'
+#   kubectl -n agentgateway-system rollout status deploy/agentgateway-proxy
+#
+# REVERT to text logging:
+#   kubectl -n agentgateway-system patch gateway agentgateway-proxy --type json \
+#     -p '[{"op":"remove","path":"/spec/infrastructure/parametersRef"}]'
+#   kubectl delete -f 19-json-logging.yaml
+#
+# VIEW (pretty):
+#   kubectl -n agentgateway-system logs deploy/agentgateway-proxy --tail=200 \
+#     | grep trace.mcp | jq .
+# =============================================================================
+
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: agentgateway-json-logging
+  namespace: agentgateway-system
+spec:
+  logging:
+    format: json        # enum: json | text (default: text)
+    # level: info       # optional; RUST_LOG syntax, e.g. "info,rmcp=warn"
+
+# =============================================================================
+# CLEANUP: see REVERT block above.
+# =============================================================================
