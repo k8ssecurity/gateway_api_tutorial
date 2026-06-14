@@ -1,0 +1,44 @@
+# =============================================================================
+# MCP tool authorization (native CEL) — tool-name allow-list
+# =============================================================================
+#
+# agentgateway's MCP authorization runs INSIDE the gateway and gates tool access
+# with CEL on `mcp.tool.name` (and JWT claims). This is the supported, reliable
+# way to enforce which tools an agent may call — no external callout needed.
+#
+# Policy (Allow-list): allow ONLY `microsoft_docs_search`. Every other MS Learn
+# tool (microsoft_docs_fetch, microsoft_code_sample_search, ...) is hidden from
+# tools/list and rejected on call ("unauthorized tool call" / "Unknown tool").
+#
+# NOTE on argument-content blocking (e.g. block when the search query contains
+# "deploy"): in agentgateway v1.2.1 the tool ARGUMENTS are not reliably exposed
+# in the pre-call authz phase (mcp.tool.arguments appears in *access logging*,
+# post-call, but not for the authz decision, and the tool-visibility check runs
+# with no arguments at all). So authz reliably gates by tool NAME; argument /
+# query-content enforcement needs the request-body callout path (ext_proc),
+# which is itself broken on v1.2.1 — see ../extproc-guardrail. Use access-log
+# tracing (../17-access-log-trace.yaml) to DETECT abusive query content today.
+# =============================================================================
+
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: mslearn-mcp-authz
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: agentgateway.dev
+      kind: AgentgatewayBackend
+      name: mslearn-mcp-backend
+  backend:
+    mcp:
+      authorization:
+        action: Allow
+        policy:
+          matchExpressions:
+            - 'mcp.tool.name == "microsoft_docs_search"'
+
+# =============================================================================
+# CLEANUP: kubectl delete -f 18-mcp-authz.yaml
+# =============================================================================
