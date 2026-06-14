@@ -17,8 +17,19 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 )
+
+// Response guardrail: redact emails (PII) and the word "secret" from completions.
+var emailRe = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
+var secretRe = regexp.MustCompile(`(?i)secret`)
+
+func maskContent(s string) string {
+	s = emailRe.ReplaceAllString(s, "[REDACTED-EMAIL]")
+	s = secretRe.ReplaceAllString(s, "[REDACTED]")
+	return s
+}
 
 var blockWords = []string{"execute"} // LLM: block "execute …", allow "teach me …"
 
@@ -71,8 +82,43 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, pass("passed"))
 }
 
+type respReq struct {
+	Body struct {
+		Choices []struct {
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	} `json:"body"`
+}
+
 func handleResponse(w http.ResponseWriter, r *http.Request) {
-	// Not guarding responses in this PoC; always pass.
+	var req respReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, pass("unparsable - fail open"))
+		return
+	}
+	changed := false
+	choices := make([]map[string]interface{}, 0, len(req.Body.Choices))
+	for _, c := range req.Body.Choices {
+		masked := maskContent(c.Message.Content)
+		if masked != c.Message.Content {
+			changed = true
+		}
+		choices = append(choices, map[string]interface{}{
+			"message": map[string]interface{}{"role": c.Message.Role, "content": masked},
+		})
+	}
+	if changed {
+		log.Printf("🟡 MASK   response — redacted email/secret in completion")
+		writeJSON(w, map[string]interface{}{"action": map[string]interface{}{
+			"body":   map[string]interface{}{"choices": choices},
+			"reason": "redacted PII / secret",
+		}})
+		return
+	}
+	log.Printf("✅ PASS   response — nothing to redact")
 	writeJSON(w, pass("passed"))
 }
 

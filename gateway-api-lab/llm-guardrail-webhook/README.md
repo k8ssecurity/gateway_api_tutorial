@@ -30,6 +30,23 @@ Contract (from the agentgateway Guardrail Webhook API):
 reply `{"action":{"reason":"passed"}}` (pass) or
 `{"action":{"body":"...","status_code":403,"reason":"..."}}` (reject).
 
+### Response guardrail (mask PII / secrets in the completion)
+
+The same webhook also implements `POST /response` (wired via `promptGuard.response`).
+It redacts emails and the word "secret" from the LLM's answer before it reaches
+the client. Response actions are pass/**mask** (modify) — not a hard reject.
+
+Verified on the lab:
+
+```
+prompt "two example email addresses"   -> OUTPUT: "[REDACTED-EMAIL] [REDACTED-EMAIL]"
+prompt "The secret code is alpha."      -> OUTPUT: "The [REDACTED] code is alpha."
+```
+
+Contract: `POST /response` ← `{"body":{"choices":[{"message":{"role","content"}}]}}`,
+reply `{"action":{"reason":"passed"}}` (pass) or
+`{"action":{"body":{"choices":[...]},"reason":"..."}}` (mask — return the modified choices).
+
 ## 2. Trace — full audit of every tool call + prompt (access logging)
 
 `../17-access-log-trace.yaml` enables the gateway's native access log with a CEL

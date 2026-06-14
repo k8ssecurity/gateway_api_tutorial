@@ -75,7 +75,13 @@ spec:
   backend:
     ai:
       promptGuard:
-        request:
+        request:                  # block prompts containing "execute"
+          - webhook:
+              backendRef:
+                kind: Service
+                name: llm-guardrail-webhook
+                port: 8000
+        response:                 # mask emails / "secret" in the completion
           - webhook:
               backendRef:
                 kind: Service
