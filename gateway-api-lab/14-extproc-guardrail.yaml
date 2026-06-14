@@ -1,0 +1,90 @@
+# =============================================================================
+# ExtProc intent guardrail — PoC
+# =============================================================================
+#
+# A custom Envoy ext_proc server (gateway-api-lab/extproc-guardrail/) that
+# inspects the REQUEST BODY of traffic through agentgateway and blocks
+# "abusive" intents, on two legs:
+#
+#   * LLM  (/openai)      block if the chat request contains "execute"   (allow "teach me ...")
+#   * MCP  (/mcp-mslearn) block if a tools/call query contains "deploy"  (allow "explain ...")
+#
+# This is the data-plane half of "intent-driven tool governance": the gateway
+# calls out to your service per request (Envoy ext_proc) so it can verify the
+# tool/prompt + its arguments — something ext_authz (headers only) and the
+# CEL tool-allowlist (tool name only) cannot do.
+#
+# BUILD + LOAD the image first (no host Go needed):
+#   cd gateway-api-lab/extproc-guardrail
+#   docker build -t extproc-guardrail:poc .
+#   kind load docker-image extproc-guardrail:poc --name gateway-api-lab
+# =============================================================================
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ext-proc-guardrail
+  namespace: agentgateway-system
+  labels:
+    app: ext-proc-guardrail
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ext-proc-guardrail
+  template:
+    metadata:
+      labels:
+        app: ext-proc-guardrail
+    spec:
+      containers:
+        - name: ext-proc-guardrail
+          image: extproc-guardrail:poc
+          imagePullPolicy: IfNotPresent   # use the kind-loaded image, don't pull
+          ports:
+            - containerPort: 18080
+          resources:
+            requests: { memory: "32Mi", cpu: "50m" }
+            limits: { memory: "64Mi", cpu: "100m" }
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ext-proc-guardrail
+  namespace: agentgateway-system
+  labels:
+    app: ext-proc-guardrail
+spec:
+  selector:
+    app: ext-proc-guardrail
+  ports:
+    - port: 4444
+      targetPort: 18080
+      protocol: TCP
+      appProtocol: kubernetes.io/h2c    # gRPC over cleartext HTTP/2
+
+---
+# Attach ext_proc to the whole agentgateway-proxy Gateway, so BOTH the
+# /openai (LLM) and /mcp-mslearn (MCP) routes are inspected.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: ext-proc-guardrail
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: agentgateway-proxy
+  traffic:
+    extProc:
+      backendRef:
+        name: ext-proc-guardrail
+        namespace: agentgateway-system
+        port: 4444
+
+# =============================================================================
+# CLEANUP:  kubectl delete -f 14-extproc-guardrail.yaml
+# =============================================================================
