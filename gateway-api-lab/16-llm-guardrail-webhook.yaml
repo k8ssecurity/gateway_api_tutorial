@@ -1,0 +1,87 @@
+# =============================================================================
+# LLM guardrail webhook — blocks abusive prompts on the /openai route
+# =============================================================================
+#
+# The supported way to BLOCK an LLM call on content: agentgateway's prompt-guard
+# webhook. The gateway parses the prompt and calls this webhook BEFORE the LLM;
+# the webhook returns pass / reject. (This works where generic ext_proc could
+# not, because the gateway supplies the parsed prompt.)
+#
+# Policy here: block prompts containing "execute"; allow the rest (e.g. "teach me").
+#
+# BUILD + LOAD:
+#   cd gateway-api-lab/llm-guardrail-webhook
+#   docker build -t llm-guardrail-webhook:poc .
+#   kind load docker-image llm-guardrail-webhook:poc --name gateway-api-lab
+# =============================================================================
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-guardrail-webhook
+  namespace: agentgateway-system
+  labels:
+    app: llm-guardrail-webhook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-guardrail-webhook
+  template:
+    metadata:
+      labels:
+        app: llm-guardrail-webhook
+    spec:
+      containers:
+        - name: webhook
+          image: llm-guardrail-webhook:poc
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          resources:
+            requests: { memory: "16Mi", cpu: "20m" }
+            limits: { memory: "64Mi", cpu: "100m" }
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-guardrail-webhook
+  namespace: agentgateway-system
+  labels:
+    app: llm-guardrail-webhook
+spec:
+  selector:
+    app: llm-guardrail-webhook
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      appProtocol: http
+
+---
+# Attach the webhook as a prompt guard on the OpenAI route.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: openai-prompt-guard
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: openai-llm
+  backend:
+    ai:
+      promptGuard:
+        request:
+          - webhook:
+              backendRef:
+                kind: Service
+                name: llm-guardrail-webhook
+                port: 8000
+
+# =============================================================================
+# CLEANUP: kubectl delete -f 16-llm-guardrail-webhook.yaml
+# =============================================================================

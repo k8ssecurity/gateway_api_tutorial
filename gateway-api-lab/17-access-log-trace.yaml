@@ -1,0 +1,44 @@
+# =============================================================================
+# Full-trace access logging (tool calls + prompts) via CEL
+# =============================================================================
+#
+# Logs the full request body of every call through agentgateway to the proxy's
+# stdout — so you get a complete audit trace of MCP tool calls (tool + arguments)
+# and LLM prompts. This is the gateway's NATIVE access log (it already parses the
+# bodies), which is why it works where an external callout could not see them.
+#
+# The gateway ALSO emits built-in GenAI telemetry automatically for LLM traffic:
+#   gen_ai.request.model, gen_ai.response.model,
+#   gen_ai.usage.input_tokens, gen_ai.usage.output_tokens, ...
+#
+# View the trace:  kubectl -n agentgateway-system logs deploy/agentgateway-proxy -f
+#
+# NOTE: logging full request bodies includes prompt content — fine for a lab,
+# but scope/redact (filter + targeted CEL fields) before using in production.
+# =============================================================================
+
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: full-trace-accesslog
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: agentgateway-proxy
+  frontend:
+    accessLog:
+      filter: "true"        # log every request (CEL; e.g. use response.code>=400 to log only errors)
+      attributes:
+        add:
+          # Full payload — captures MCP tools/call (name + arguments) and LLM messages.
+          - name: trace.body
+            expression: 'default(string(request.body), "")'
+          - name: trace.path
+            expression: 'request.path'
+
+# =============================================================================
+# CLEANUP: kubectl delete -f 17-access-log-trace.yaml
+# =============================================================================
